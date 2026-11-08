@@ -1,0 +1,666 @@
+{
+  "info": {
+    "name": "AutoGiro · fluxo completo da ordem de serviço",
+    "description": "Fluxo da OS pelos três microsserviços: OS Service (atendimento e orquestração da Saga), Execution Service (estoque e oficina) e Billing Service (orçamento e Mercado Pago).\n\n**Variáveis:** `os_url`, `execution_url` e `billing_url` apontam para cada serviço (localmente, portas 8001, 8003 e 8002; na nuvem, as três recebem o endereço do Kong). `token` é o JWT emitido pela Lambda `autogiro-auth` a partir do CPF.\n\n**Ordem:** rode as pastas na sequência. Depois de aprovar o orçamento, abra o `payment_link` no navegador e pague com o comprador de teste do Mercado Pago; em seguida, sincronize o pagamento e acompanhe a OS.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{token}}",
+        "type": "string"
+      }
+    ]
+  },
+  "variable": [
+    {
+      "key": "os_url",
+      "value": "http://localhost:8001"
+    },
+    {
+      "key": "execution_url",
+      "value": "http://localhost:8003"
+    },
+    {
+      "key": "billing_url",
+      "value": "http://localhost:8002"
+    },
+    {
+      "key": "token",
+      "value": ""
+    },
+    {
+      "key": "vehicle_id",
+      "value": "1"
+    },
+    {
+      "key": "service_type_id",
+      "value": "1"
+    },
+    {
+      "key": "part_id",
+      "value": "2"
+    },
+    {
+      "key": "order_id",
+      "value": ""
+    },
+    {
+      "key": "payment_link",
+      "value": ""
+    }
+  ],
+  "item": [
+    {
+      "name": "1. Cadastros (OS Service)",
+      "description": "Clientes, veículos e catálogo de serviços já vêm nos dados de demonstração.",
+      "item": [
+        {
+          "name": "Listar clientes",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{os_url}}/api/v1/clients",
+              "host": [
+                "{{os_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clients"
+              ]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "Veículos da cliente Maria",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{os_url}}/api/v1/vehicles/client/1",
+              "host": [
+                "{{os_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "vehicles",
+                "client",
+                "1"
+              ]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "Catálogo de serviços",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{os_url}}/api/v1/service-types",
+              "host": [
+                "{{os_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "service-types"
+              ]
+            },
+            "description": ""
+          }
+        }
+      ]
+    },
+    {
+      "name": "2. Estoque (Execution Service)",
+      "description": "Peças com estoque, quantidade reservada e saldo disponível.",
+      "item": [
+        {
+          "name": "Listar peças",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{execution_url}}/api/v1/parts",
+              "host": [
+                "{{execution_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "parts"
+              ]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "Peça usada na OS",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{execution_url}}/api/v1/parts/{{part_id}}",
+              "host": [
+                "{{execution_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "parts",
+                "{{part_id}}"
+              ]
+            },
+            "description": ""
+          }
+        }
+      ]
+    },
+    {
+      "name": "3. Abertura da OS e Saga (OS Service)",
+      "description": "Abrir a OS inicia a Saga: a reserva de peças e o orçamento acontecem por mensagens.",
+      "item": [
+        {
+          "name": "Abrir OS",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{os_url}}/api/v1/service-orders",
+              "host": [
+                "{{os_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "service-orders"
+              ]
+            },
+            "description": "Guarda o id da OS em `order_id`.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"vehicle_id\": \"{{vehicle_id}}\",\n  \"notes\": \"Barulho ao frear\",\n  \"items\": [\n    {\n      \"service_type_id\": \"{{service_type_id}}\",\n      \"quantity\": 1\n    }\n  ],\n  \"parts\": [\n    {\n      \"part_id\": \"{{part_id}}\",\n      \"quantity\": 1\n    }\n  ]\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const os = pm.response.json();",
+                  "pm.collectionVariables.set(\"order_id\", os.id);",
+                  "pm.test(\"OS aberta e Saga iniciada\", () => pm.expect(os.status).to.eql(\"RECEBIDA\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Detalhe da OS",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{os_url}}/api/v1/service-orders/{{order_id}}",
+              "host": [
+                "{{os_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "service-orders",
+                "{{order_id}}"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "\"Depois de alguns segundos: AGUARDANDO_APROVACAO, com o orçamento.\""
+            }
+          }
+        },
+        {
+          "name": "Estado da Saga",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{os_url}}/api/v1/service-orders/{{order_id}}/saga",
+              "host": [
+                "{{os_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "service-orders",
+                "{{order_id}}",
+                "saga"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "\"Etapa atual e situação de cada etapa e compensação.\""
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "4. Orçamento (Billing Service)",
+      "description": "A cliente aprova ou recusa. Aprovar cria a cobrança no Mercado Pago.",
+      "item": [
+        {
+          "name": "Ver orçamento",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{billing_url}}/api/v1/budgets/{{order_id}}",
+              "host": [
+                "{{billing_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "budgets",
+                "{{order_id}}"
+              ]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "Aprovar orçamento",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{billing_url}}/api/v1/budgets/{{order_id}}/approve",
+              "host": [
+                "{{billing_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "budgets",
+                "{{order_id}}",
+                "approve"
+              ]
+            },
+            "description": "Guarda o link de pagamento em `payment_link`. Abra-o no navegador para pagar."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const aprovacao = pm.response.json();",
+                  "pm.collectionVariables.set(\"payment_link\", aprovacao.payment_link);",
+                  "pm.test(\"Link de pagamento gerado\", () => pm.expect(aprovacao.payment_link).to.include(\"mercadopago\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Recusar orçamento (alternativa)",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{billing_url}}/api/v1/budgets/{{order_id}}/reject",
+              "host": [
+                "{{billing_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "budgets",
+                "{{order_id}}",
+                "reject"
+              ]
+            },
+            "description": "Caminho de falha: a Saga libera as peças e cancela a OS."
+          }
+        }
+      ]
+    },
+    {
+      "name": "5. Pagamento (Billing Service)",
+      "description": "Depois de pagar no link, o monitor confirma em até 15 s; o sync confirma na hora.",
+      "item": [
+        {
+          "name": "Sincronizar com o Mercado Pago",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{billing_url}}/api/v1/payments/{{order_id}}/sync",
+              "host": [
+                "{{billing_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "payments",
+                "{{order_id}}",
+                "sync"
+              ]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "Ver pagamento",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{billing_url}}/api/v1/payments/{{order_id}}",
+              "host": [
+                "{{billing_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "payments",
+                "{{order_id}}"
+              ]
+            },
+            "description": ""
+          }
+        }
+      ]
+    },
+    {
+      "name": "6. Oficina (Execution Service)",
+      "description": "Com o pagamento confirmado, a OS entra na fila. O mecânico avança cada etapa.",
+      "item": [
+        {
+          "name": "Fila da oficina",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{execution_url}}/api/v1/executions?status=NA_FILA",
+              "host": [
+                "{{execution_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "executions?status=NA_FILA"
+              ]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "Iniciar diagnóstico",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{execution_url}}/api/v1/executions/{{order_id}}/diagnosis",
+              "host": [
+                "{{execution_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "executions",
+                "{{order_id}}",
+                "diagnosis"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"note\": \"Pastilhas no limite\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Iniciar reparo",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{execution_url}}/api/v1/executions/{{order_id}}/repair",
+              "host": [
+                "{{execution_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "executions",
+                "{{order_id}}",
+                "repair"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"note\": \"Troca das pastilhas dianteiras\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Finalizar",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{execution_url}}/api/v1/executions/{{order_id}}/finish",
+              "host": [
+                "{{execution_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "executions",
+                "{{order_id}}",
+                "finish"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"note\": \"Teste de rodagem ok\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Cancelar execução (alternativa)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{execution_url}}/api/v1/executions/{{order_id}}/cancel",
+              "host": [
+                "{{execution_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "executions",
+                "{{order_id}}",
+                "cancel"
+              ]
+            },
+            "description": "Caminho de falha: a Saga estorna o pagamento e libera as peças.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reason\": \"Reparo inviável\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Execução com a linha do tempo",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{execution_url}}/api/v1/executions/{{order_id}}",
+              "host": [
+                "{{execution_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "executions",
+                "{{order_id}}"
+              ]
+            },
+            "description": ""
+          }
+        }
+      ]
+    },
+    {
+      "name": "7. Entrega e acompanhamento (OS Service)",
+      "description": "A entrega é a única mudança de status manual.",
+      "item": [
+        {
+          "name": "Entregar o veículo",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{os_url}}/api/v1/service-orders/{{order_id}}/deliver",
+              "host": [
+                "{{os_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "service-orders",
+                "{{order_id}}",
+                "deliver"
+              ]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "Histórico da OS",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{os_url}}/api/v1/service-orders/{{order_id}}/history",
+              "host": [
+                "{{os_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "service-orders",
+                "{{order_id}}",
+                "history"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "\"Cada mudança de status com o evento que a causou.\""
+            }
+          }
+        },
+        {
+          "name": "Acompanhamento público (sem token)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{os_url}}/api/v1/service-orders/{{order_id}}/status",
+              "host": [
+                "{{os_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "service-orders",
+                "{{order_id}}",
+                "status"
+              ]
+            },
+            "description": "",
+            "auth": {
+              "type": "noauth"
+            }
+          }
+        },
+        {
+          "name": "OS ativas",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{os_url}}/api/v1/service-orders",
+              "host": [
+                "{{os_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "service-orders"
+              ]
+            },
+            "description": ""
+          }
+        }
+      ]
+    }
+  ]
+}

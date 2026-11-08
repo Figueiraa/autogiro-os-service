@@ -26,3 +26,6 @@ report/
 *.tfstate.*
 .terraform.lock.hcl
 terraform.tfvars
+
+# Configuração local do ambiente completo (tem o token do Mercado Pago)
+.env.ecossistema

@@ -32,6 +32,8 @@ def pytest_collection_modifyitems(items):
             item.add_marker(pytest.mark.unit)
         elif "/tests/integration/" in path:
             item.add_marker(pytest.mark.integration)
+        elif "/tests/bdd/" in path:
+            item.add_marker(pytest.mark.bdd)
 
 
 def _rotas_de_teste() -> APIRouter:

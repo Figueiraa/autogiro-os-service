@@ -1,0 +1,131 @@
+# Plataforma AutoGiro completa, localmente: os 3 microsserviços, cada um com o seu
+# banco, e o RabbitMQ que leva comandos e eventos da Saga entre eles.
+#
+#   cp .env.ecossistema.example .env.ecossistema     # preencha JWT_SECRET e o token do Mercado Pago
+#   docker compose -f docker-compose.ecossistema.yml --env-file .env.ecossistema up -d
+#
+# Usa as imagens publicadas pelo CI de cada serviço (GHCR, públicas). Para testar
+# uma versão específica: OS_TAG, BILLING_TAG ou EXECUTION_TAG com o hash do commit.
+#
+# Portas no host:
+#   OS Service 8001 · Billing 8002 · Execution 8003
+#   RabbitMQ 5672 (painel em http://localhost:15672, guest/guest)
+
+x-servico: &servico
+  restart: unless-stopped
+  depends_on: &dependencias
+    rabbitmq:
+      condition: service_healthy
+
+services:
+  rabbitmq:
+    image: rabbitmq:4.0-management
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      retries: 12
+
+  # ─── OS Service (PostgreSQL) ────────────────────────────────────────────────
+  os-db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: autogiro_os
+      POSTGRES_USER: autogiro
+      POSTGRES_PASSWORD: autogiro
+    volumes:
+      - os-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U autogiro -d autogiro_os"]
+      interval: 5s
+      retries: 10
+
+  os-service:
+    <<: *servico
+    image: ghcr.io/figueiraa/autogiro-os-service:${OS_TAG:-latest}
+    command: ["sh", "-c", "python -m app.infrastructure.migrations && uvicorn app.main:app --host 0.0.0.0 --port 8000"]
+    ports:
+      - "8001:8000"
+    environment:
+      JWT_SECRET: ${JWT_SECRET:?defina JWT_SECRET no .env.ecossistema}
+      DATABASE_URL: postgresql+asyncpg://autogiro:autogiro@os-db:5432/autogiro_os
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      EXECUTION_SERVICE_URL: http://execution-service:8000
+      SAGA_STEP_RETRY_SECONDS: ${SAGA_STEP_RETRY_SECONDS:-120}
+    depends_on:
+      <<: *dependencias
+      os-db:
+        condition: service_healthy
+
+  # ─── Billing Service (PostgreSQL + Mercado Pago) ────────────────────────────
+  billing-db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: autogiro_billing
+      POSTGRES_USER: autogiro
+      POSTGRES_PASSWORD: autogiro
+    volumes:
+      - billing-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U autogiro -d autogiro_billing"]
+      interval: 5s
+      retries: 10
+
+  billing-service:
+    <<: *servico
+    image: ghcr.io/figueiraa/autogiro-billing-service:${BILLING_TAG:-latest}
+    command: ["sh", "-c", "python -m app.infrastructure.migrations && uvicorn app.main:app --host 0.0.0.0 --port 8000"]
+    ports:
+      - "8002:8000"
+    environment:
+      JWT_SECRET: ${JWT_SECRET}
+      DATABASE_URL: postgresql+asyncpg://autogiro:autogiro@billing-db:5432/autogiro_billing
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      MERCADOPAGO_ACCESS_TOKEN: ${MERCADOPAGO_ACCESS_TOKEN:-}
+      PAYMENT_TIMEOUT_MINUTES: ${PAYMENT_TIMEOUT_MINUTES:-60}
+      APPROVAL_TIMEOUT_MINUTES: ${APPROVAL_TIMEOUT_MINUTES:-1440}
+    depends_on:
+      <<: *dependencias
+      billing-db:
+        condition: service_healthy
+
+  # ─── Execution Service (MongoDB) ────────────────────────────────────────────
+  execution-mongo:
+    image: mongo:7.0
+    command: ["--replSet", "rs0", "--bind_ip_all"]
+    volumes:
+      - execution-db:/data/db
+    healthcheck:
+      # Inicia o replica set na primeira execução (transações exigem replica set).
+      test:
+        - CMD
+        - mongosh
+        - --quiet
+        - --eval
+        - "try { rs.status().ok } catch (e) { rs.initiate({_id: 'rs0', members: [{_id: 0, host: 'execution-mongo:27017'}]}).ok }"
+      interval: 5s
+      retries: 20
+
+  execution-service:
+    <<: *servico
+    image: ghcr.io/figueiraa/autogiro-execution-service:${EXECUTION_TAG:-latest}
+    command: ["sh", "-c", "python -m app.infrastructure.mongo.seed && uvicorn app.main:app --host 0.0.0.0 --port 8000"]
+    ports:
+      - "8003:8000"
+    environment:
+      JWT_SECRET: ${JWT_SECRET}
+      MONGODB_URL: mongodb://execution-mongo:27017/?replicaSet=rs0
+      MONGODB_DATABASE: autogiro_execution
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      EXECUTION_QUEUE_CAPACITY: ${EXECUTION_QUEUE_CAPACITY:-20}
+    depends_on:
+      <<: *dependencias
+      execution-mongo:
+        condition: service_healthy
+
+volumes:
+  os-db:
+  billing-db:
+  execution-db:
