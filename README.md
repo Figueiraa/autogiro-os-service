@@ -20,6 +20,57 @@ Clean Architecture (domínio, aplicação, infraestrutura e interfaces), sondas 
 métricas Prometheus, logs JSON, validação do JWT emitido pelo `autogiro-auth` e pipeline com
 testes, SonarCloud e imagem Docker.
 
+## API
+
+Todas as rotas exigem o JWT do `autogiro-auth`, exceto o acompanhamento público da OS.
+Documentação interativa em `/docs` (Swagger).
+
+| Método | Rota | Descrição |
+|---|---|---|
+| `GET` `POST` | `/api/v1/clients` | Listar e cadastrar clientes |
+| `GET` `PATCH` `DELETE` | `/api/v1/clients/{id}` | Detalhar, alterar e remover |
+| `GET` `POST` | `/api/v1/vehicles` | Listar e cadastrar veículos |
+| `GET` `PATCH` `DELETE` | `/api/v1/vehicles/{id}` | Detalhar, alterar e remover |
+| `GET` | `/api/v1/vehicles/client/{client_id}` | Veículos de um cliente |
+| `GET` `POST` | `/api/v1/service-types` | Catálogo de serviços |
+| `GET` `PATCH` `DELETE` | `/api/v1/service-types/{id}` | Detalhar, alterar e remover |
+| `POST` | `/api/v1/service-orders` | Abre a OS com serviços do catálogo e peças pedidas |
+| `GET` | `/api/v1/service-orders` | OS ativas, da que exige ação primeiro (filtro opcional por `status`) |
+| `GET` | `/api/v1/service-orders/{id}` | Detalhe da OS |
+| `GET` | `/api/v1/service-orders/{id}/history` | Histórico de status, com motivo e origem de cada mudança |
+| `POST` | `/api/v1/service-orders/{id}/deliver` | Entrega do veículo (`FINALIZADA → ENTREGUE`) |
+| `GET` | `/api/v1/service-orders/{id}/status` | **Pública:** acompanhamento pelo cliente |
+| `GET` | `/api/v1/service-orders/metrics/average-execution-time` | Tempo médio do reparo |
+
+### Ciclo de vida da OS
+
+```
+RECEBIDA → AGUARDANDO_APROVACAO → AGUARDANDO_PAGAMENTO → PAGA → NA_FILA
+        → EM_DIAGNOSTICO → EM_EXECUCAO → FINALIZADA → ENTREGUE
+
+Qualquer etapa antes de FINALIZADA → EM_CANCELAMENTO → CANCELADA (com o motivo)
+```
+
+A abertura não calcula orçamento nem mexe em estoque. Peças e estoque pertencem ao
+Execution Service; orçamento e pagamento, ao Billing Service. Aqui ficam o pedido e as cópias
+que voltam de lá (nome e preço da peça, total do orçamento, link de pagamento).
+
+Ao abrir a OS, as peças são conferidas no catálogo do Execution Service
+(`EXECUTION_SERVICE_URL`, com timeout de 2 s). Se ele não responder, a OS é aberta assim mesmo
+e a peça é validada depois, no fluxo da OS.
+
+## Banco de dados
+
+PostgreSQL próprio, num projeto Neon só do serviço (`terraform/`). O schema é versionado em
+`migrations/` e aplicado por `python -m app.infrastructure.migrations`, que roda cada arquivo
+uma única vez, em ordem.
+
+| Migration | Conteúdo |
+|---|---|
+| `001_schema_inicial.sql` | Clientes, veículos, catálogo, ordens de serviço e histórico de status |
+| `002_contrato_autenticacao.sql` | View `auth.clients` e usuário somente leitura para a Lambda de autenticação |
+| `003_dados_de_demonstracao.sql` | Clientes, veículos e serviços de exemplo |
+
 ## Como rodar
 
 ```bash
@@ -31,7 +82,14 @@ ruff check app tests scripts            # lint
 bandit -r app -ll                       # análise de segurança
 
 cp .env.example .env                    # defina o JWT_SECRET
-docker compose up --build               # API em http://localhost:8001 (Swagger em /docs)
+docker compose up --build               # aplica as migrations e sobe a API em http://localhost:8001
+```
+
+Os testes rodam sobre SQLite em memória. Os testes das migrations precisam de um PostgreSQL
+e rodam quando `TEST_POSTGRES_URL` está definida (no CI, um container do PostgreSQL 17):
+
+```bash
+TEST_POSTGRES_URL=postgresql+asyncpg://autogiro:autogiro@localhost:5433/autogiro_os pytest
 ```
 
 O `JWT_SECRET` é obrigatório e não tem valor padrão no código: o serviço não sobe sem ele.
