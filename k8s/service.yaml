@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: os-service
+  namespace: autogiro
+  labels:
+    app: os-service
+spec:
+  type: ClusterIP
+  selector:
+    app: os-service
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+# Acesso direto (Swagger em /docs):
+#   kubectl -n autogiro port-forward svc/os-service 8000:80

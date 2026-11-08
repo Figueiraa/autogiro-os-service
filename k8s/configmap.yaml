@@ -1,0 +1,18 @@
+# Configuração própria do os-service. O que é da plataforma (JWT, RabbitMQ, New Relic)
+# vem do ConfigMap e do Secret `autogiro-plataforma`.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: os-service-config
+  namespace: autogiro
+  labels:
+    app: os-service
+data:
+  LOG_LEVEL: "INFO"
+  CORS_ORIGINS: "*"
+  # Notificação de mudança de status da OS: log estruturado (sem SMTP no cluster).
+  NOTIFICATION_CHANNEL: "log"
+  # Consulta síncrona ao catálogo de peças na abertura da OS: chamada interna, sem passar pelo Kong.
+  EXECUTION_SERVICE_URL: "http://execution-service.autogiro.svc.cluster.local"
+  # Comando sem resposta há mais que isto é reenviado.
+  SAGA_STEP_RETRY_SECONDS: "120"
