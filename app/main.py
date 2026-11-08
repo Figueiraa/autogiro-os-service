@@ -3,10 +3,19 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+# Importa os modelos para registrar todas as tabelas no metadata do SQLAlchemy.
+import app.infrastructure.persistence.models  # noqa: F401
 from app.infrastructure.config import settings
+from app.infrastructure.database import database_is_up
 from app.infrastructure.logging_config import setup_logging
 from app.infrastructure.observability.metrics import set_app_info
-from app.interfaces.http.controllers import health
+from app.interfaces.http.controllers import (
+    client_controller,
+    health,
+    service_order_controller,
+    service_type_controller,
+    vehicle_controller,
+)
 from app.interfaces.http.exception_handlers import register_exception_handlers
 from app.interfaces.http.middleware import (
     MetricsMiddleware,
@@ -29,7 +38,7 @@ def create_app() -> FastAPI:
         version=settings.SERVICE_VERSION,
     )
     # Verificações de prontidão (banco, broker), registradas por cada adapter.
-    app.state.readiness_checks = {}
+    app.state.readiness_checks = {"database": database_is_up}
 
     set_app_info(name=settings.SERVICE_NAME, version=settings.SERVICE_VERSION)
 
@@ -48,6 +57,13 @@ def create_app() -> FastAPI:
 
     register_exception_handlers(app)
     app.include_router(health.router)
+    for controller in (
+        client_controller,
+        vehicle_controller,
+        service_type_controller,
+        service_order_controller,
+    ):
+        app.include_router(controller.router, prefix=API_V1)
     return app
 
 

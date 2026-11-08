@@ -1,16 +1,21 @@
 import os
 
-# Definido antes de importar a aplicação: o JWT_SECRET é obrigatório e não tem
-# valor padrão no código.
+# Definidos antes de importar a aplicação: o JWT_SECRET é obrigatório e não tem
+# valor padrão no código, e o banco dos testes é SQLite em memória.
 os.environ.setdefault("JWT_SECRET", "segredo-de-teste-com-mais-de-32-bytes-de-tamanho")
+os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
 
 import pytest
 import pytest_asyncio
 from fastapi import APIRouter, Depends
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from app.application.ports.part_catalog import PartCatalogUnavailableError, PartInfo
 from app.domain.exceptions import BusinessRuleError, ConflictError, NotFoundError
+from app.infrastructure.database import Base, get_db
 from app.infrastructure.security.jwt_tokens import Principal, issue_token
+from app.interfaces.http.controllers.service_order_controller import get_part_catalog
 from app.interfaces.http.dependencies import get_current_principal
 from app.main import API_V1, create_app
 
@@ -60,10 +65,51 @@ def _rotas_de_teste() -> APIRouter:
     return router
 
 
+class FakePartCatalog:
+    """Catálogo de peças do Execution Service, em memória."""
+
+    def __init__(self, parts: dict[int, PartInfo] | None = None, available: bool = True):
+        self.parts = parts if parts is not None else {}
+        self.available = available
+        self.lookups: list[int] = []
+
+    async def find(self, part_id: int) -> PartInfo | None:
+        self.lookups.append(part_id)
+        if not self.available:
+            raise PartCatalogUnavailableError("fora do ar")
+        return self.parts.get(part_id)
+
+
 @pytest.fixture
-def app():
+def part_catalog() -> FakePartCatalog:
+    return FakePartCatalog(
+        {
+            3: PartInfo(id=3, name="Filtro de óleo", unit_price=32.5),
+            4: PartInfo(id=4, name="Pastilha de freio", unit_price=210.0),
+        }
+    )
+
+
+@pytest_asyncio.fixture
+async def db():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    async with session_factory() as session:
+        yield session
+    await engine.dispose()
+
+
+@pytest.fixture
+def app(db: AsyncSession, part_catalog: FakePartCatalog):
     application = create_app()
     application.include_router(_rotas_de_teste(), prefix=API_V1)
+
+    # Os testes de sondas registram as próprias verificações; a do banco real tem teste próprio.
+    application.state.readiness_checks = {}
+    application.dependency_overrides[get_db] = lambda: db
+    application.dependency_overrides[get_part_catalog] = lambda: part_catalog
     return application
 
 
@@ -82,3 +128,11 @@ def token() -> str:
 @pytest.fixture
 def auth_headers(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
+
+
+@pytest_asyncio.fixture
+async def auth_client(app, auth_headers):
+    """Cliente HTTP autenticado com um JWT no formato emitido pelo `autogiro-auth`."""
+    transport = ASGITransport(app=app, raise_app_exceptions=False)
+    async with AsyncClient(transport=transport, base_url="http://test", headers=auth_headers) as c:
+        yield c

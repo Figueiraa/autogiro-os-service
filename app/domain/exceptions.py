@@ -18,3 +18,12 @@ class ConflictError(DomainError):
 
 class BusinessRuleError(DomainError):
     """Regra de negócio violada (por exemplo, transição de status inválida)."""
+
+
+class InvalidStatusTransitionError(BusinessRuleError):
+    """A máquina de estados da OS não permite a transição pedida."""
+
+    def __init__(self, current: str, target: str):
+        super().__init__(f"Transição de status inválida: '{current}' → '{target}'")
+        self.current = current
+        self.target = target
