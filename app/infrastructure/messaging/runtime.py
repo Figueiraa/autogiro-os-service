@@ -10,14 +10,17 @@ import logging
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 
+from opentelemetry import trace
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.application.messages import EXCHANGE_EVENTS, Envelope
+from app.application.use_cases.saga_orchestrator import HandleResult
 from app.infrastructure.composition import build_orchestrator
 from app.infrastructure.config import settings
 from app.infrastructure.messaging.consumer import QueueConsumer
 from app.infrastructure.messaging.rabbitmq import QUEUE_SAGA_EVENTS, SAGA_EVENT_BINDINGS, RabbitMQClient
 from app.infrastructure.observability.metrics import record_status_duration, record_status_transition
+from app.infrastructure.observability.tracing import load_context, publish_span
 from app.infrastructure.persistence.repositories.saga_repository import SqlAlchemyOutbox
 
 logger = logging.getLogger("autogiro.messaging")
@@ -37,17 +40,38 @@ async def publish_pending(
     published = 0
     async with session_factory() as db:
         for row in await SqlAlchemyOutbox(db).pending(limit):
-            await publish(
-                row.exchange,
-                row.routing_key,
-                row.body.encode("utf-8"),
+            with publish_span(
+                exchange=row.exchange,
+                routing_key=row.routing_key,
                 message_id=row.message_id,
                 message_type=row.message_type,
-            )
+                body=row.body,
+                stored_context=load_context(row.trace_context),
+            ) as headers:
+                await publish(
+                    row.exchange,
+                    row.routing_key,
+                    row.body.encode("utf-8"),
+                    message_id=row.message_id,
+                    message_type=row.message_type,
+                    headers=headers,
+                )
             row.published_at = datetime.now(UTC)
             await db.commit()
             published += 1
     return published
+
+
+def tag_saga_result(result: HandleResult) -> None:
+    """Estado da Saga e status da OS no span do consumo: base do painel da Saga."""
+    span = trace.get_current_span()
+    span.set_attribute("autogiro.saga.outcome", result.outcome)
+    if result.saga_state:
+        span.set_attribute("autogiro.saga.state", result.saga_state)
+    if result.failure_reason:
+        span.set_attribute("autogiro.saga.failure_reason", result.failure_reason)
+    if result.transitions:
+        span.set_attribute("autogiro.order.status", result.transitions[-1][0].value)
 
 
 def handle_with(session_factory: async_sessionmaker[AsyncSession]) -> Callable[[Envelope], Awaitable[object]]:
@@ -56,6 +80,7 @@ def handle_with(session_factory: async_sessionmaker[AsyncSession]) -> Callable[[
     async def handle(envelope: Envelope) -> object:
         async with session_factory() as db:
             result = await build_orchestrator(db).handle(envelope)
+        tag_saga_result(result)
         for status, seconds in result.transitions:
             record_status_transition(status.value)
             if seconds is not None:

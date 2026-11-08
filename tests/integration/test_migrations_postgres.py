@@ -33,8 +33,16 @@ async def test_aplica_tudo_uma_vez_e_e_idempotente(banco_limpo):
         "002_contrato_autenticacao.sql",
         "003_dados_de_demonstracao.sql",
         "004_saga.sql",
+        "005_contexto_de_rastreamento.sql",
     ]
     assert segunda == []
+    colunas = {
+        row["column_name"]
+        for row in await banco_limpo.fetch(
+            "SELECT column_name FROM information_schema.columns WHERE table_name = 'outbox'"
+        )
+    }
+    assert "trace_context" in colunas
 
 
 async def test_cria_as_tabelas_e_os_dados_de_demonstracao(banco_limpo):

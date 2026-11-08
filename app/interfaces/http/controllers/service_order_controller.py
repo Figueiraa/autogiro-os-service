@@ -26,6 +26,7 @@ from app.infrastructure.observability.metrics import (
     record_status_duration,
     record_status_transition,
 )
+from app.infrastructure.observability.tracing import annotate
 from app.infrastructure.persistence.repositories.client_repository import SqlAlchemyClientRepository
 from app.infrastructure.persistence.repositories.saga_repository import (
     SqlAlchemySagaRepository,
@@ -134,6 +135,7 @@ async def create_order(
     # Métricas de negócio ficam no adapter: o caso de uso não depende de infraestrutura.
     record_service_order_opened()
     record_status_transition(order.status.value)
+    annotate(order_id=order.id)
     return order
 
 
