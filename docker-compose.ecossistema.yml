@@ -11,6 +11,13 @@
 #   OS Service 8001 · Billing 8002 · Execution 8003
 #   RabbitMQ 5672 (painel em http://localhost:15672, guest/guest)
 
+# Rastreamento: com OTEL_EXPORTER_OTLP_ENDPOINT e NEW_RELIC_LICENSE_KEY preenchidos,
+# os três serviços enviam traces ao New Relic e uma OS aparece como um trace só.
+x-rastreamento: &rastreamento
+  OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+  NEW_RELIC_LICENSE_KEY: ${NEW_RELIC_LICENSE_KEY:-}
+  DEPLOYMENT_ENVIRONMENT: ${DEPLOYMENT_ENVIRONMENT:-local}
+
 x-servico: &servico
   restart: unless-stopped
   depends_on: &dependencias
@@ -49,6 +56,7 @@ services:
     ports:
       - "8001:8000"
     environment:
+      <<: *rastreamento
       JWT_SECRET: ${JWT_SECRET:?defina JWT_SECRET no .env.ecossistema}
       DATABASE_URL: postgresql+asyncpg://autogiro:autogiro@os-db:5432/autogiro_os
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
@@ -80,6 +88,7 @@ services:
     ports:
       - "8002:8000"
     environment:
+      <<: *rastreamento
       JWT_SECRET: ${JWT_SECRET}
       DATABASE_URL: postgresql+asyncpg://autogiro:autogiro@billing-db:5432/autogiro_billing
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
@@ -115,6 +124,7 @@ services:
     ports:
       - "8003:8000"
     environment:
+      <<: *rastreamento
       JWT_SECRET: ${JWT_SECRET}
       MONGODB_URL: mongodb://execution-mongo:27017/?replicaSet=rs0
       MONGODB_DATABASE: autogiro_execution
