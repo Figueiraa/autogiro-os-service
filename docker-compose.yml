@@ -1,0 +1,42 @@
+# Ambiente local do OS Service: API + PostgreSQL + RabbitMQ.
+#   cp .env.example .env && docker compose up --build
+# Portas no host: API 8001 · Postgres 5433 · RabbitMQ 5672 (painel em 15672).
+services:
+  api:
+    build: .
+    env_file: .env
+    ports:
+      - "8001:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: autogiro_os
+      POSTGRES_USER: autogiro
+      POSTGRES_PASSWORD: autogiro
+    ports:
+      - "5433:5432"
+    volumes:
+      - os-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U autogiro -d autogiro_os"]
+      interval: 5s
+      retries: 10
+
+  rabbitmq:
+    image: rabbitmq:4.0-management
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      retries: 10
+
+volumes:
+  os-db:
