@@ -23,6 +23,17 @@ class Settings(BaseSettings):
     EXECUTION_SERVICE_URL: str | None = None
     EXECUTION_SERVICE_TIMEOUT_SECONDS: float = 2.0
 
+    # Mensageria (RabbitMQ). Sem URL, a API sobe sem consumir nem publicar mensagens:
+    # os comandos ficam no outbox até o broker ser configurado.
+    RABBITMQ_URL: str | None = None
+    # Comando sem resposta há mais que isto é reenviado (o participante é idempotente).
+    SAGA_STEP_RETRY_SECONDS: int = 120
+    SAGA_STALL_CHECK_SECONDS: float = 30.0
+    OUTBOX_POLL_SECONDS: float = 1.0
+    # Falha técnica ao processar: tentativas com atraso antes de ir para a DLQ.
+    MESSAGE_MAX_RETRIES: int = 3
+    MESSAGE_RETRY_DELAY_MS: int = 5000
+
     # Notificações de mudança de status da OS.
     # auto  -> e-mail se SMTP_HOST estiver definido, senão log
     # email -> força o canal de e-mail (SMTP)

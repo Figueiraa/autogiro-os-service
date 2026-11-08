@@ -42,8 +42,19 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+      # RabbitMQ de verdade para os testes de mensageria (publicação, consumo, retry e DLQ).
+      rabbitmq:
+        image: rabbitmq:4.0-management
+        ports:
+          - 5672:5672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 12
     env:
       TEST_POSTGRES_URL: postgresql+asyncpg://autogiro:autogiro@localhost:5432/autogiro_os
+      TEST_RABBITMQ_URL: amqp://guest:guest@localhost:5672/
     steps:
       - uses: actions/checkout@v4
 

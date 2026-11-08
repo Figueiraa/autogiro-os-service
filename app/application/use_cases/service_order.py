@@ -6,11 +6,13 @@ que reserva as peças no Execution Service e gera o orçamento no Billing Servic
 
 import logging
 from datetime import UTC, datetime
+from typing import Protocol
 
 from app.application.dtos.service_order_dtos import AverageExecutionTimeResult, OpenServiceOrderInput
 from app.application.ports.client_repository import ClientRepositoryPort
 from app.application.ports.notifier import NotifierPort
 from app.application.ports.part_catalog import PartCatalogPort, PartCatalogUnavailableError
+from app.application.ports.saga import UnitOfWorkPort
 from app.application.ports.service_order_repository import ServiceOrderRepositoryPort
 from app.application.ports.service_type_repository import ServiceTypeRepositoryPort
 from app.application.ports.vehicle_repository import VehicleRepositoryPort
@@ -19,6 +21,10 @@ from app.domain.exceptions import BusinessRuleError, NotFoundError
 from app.domain.value_objects.service_order_status import ServiceOrderStatus
 
 logger = logging.getLogger(__name__)
+
+
+class SagaStarterPort(Protocol):
+    async def start(self, order: ServiceOrder) -> object: ...
 
 
 class OpenServiceOrderUseCase:
@@ -30,11 +36,15 @@ class OpenServiceOrderUseCase:
         vehicles: VehicleRepositoryPort,
         service_types: ServiceTypeRepositoryPort,
         part_catalog: PartCatalogPort,
+        saga: SagaStarterPort,
+        uow: UnitOfWorkPort,
     ):
         self._repo = repository
         self._vehicles = vehicles
         self._service_types = service_types
         self._parts = part_catalog
+        self._saga = saga
+        self._uow = uow
 
     async def execute(self, data: OpenServiceOrderInput) -> ServiceOrder:
         vehicle = await self._vehicles.get_by_id(data.vehicle_id)
@@ -69,7 +79,12 @@ class OpenServiceOrderUseCase:
             notes=data.notes,
             now=now,
         )
-        return await self._repo.add(order)
+        # A OS e o início da Saga (com o comando de reserva no outbox) são gravados
+        # na mesma transação: não existe OS aberta sem Saga, nem Saga sem OS.
+        order = await self._repo.add(order, commit=False)
+        await self._saga.start(order)
+        await self._uow.commit()
+        return order
 
     async def _validate_parts(self, part_ids: list[int]) -> None:
         """Avisa na hora se uma peça não existe; se o catálogo estiver fora, segue em frente."""

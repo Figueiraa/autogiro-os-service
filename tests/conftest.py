@@ -10,6 +10,7 @@ import pytest_asyncio
 from fastapi import APIRouter, Depends
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import StaticPool
 
 from app.application.ports.part_catalog import PartCatalogUnavailableError, PartInfo
 from app.domain.exceptions import BusinessRuleError, ConflictError, NotFoundError
@@ -91,14 +92,19 @@ def part_catalog() -> FakePartCatalog:
 
 
 @pytest_asyncio.fixture
-async def db():
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
-    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+async def session_factory():
+    """Banco em memória compartilhado entre sessões (StaticPool: uma conexão só)."""
+    engine = create_async_engine("sqlite+aiosqlite://", poolclass=StaticPool)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    yield async_sessionmaker(engine, expire_on_commit=False)
+    await engine.dispose()
+
+
+@pytest_asyncio.fixture
+async def db(session_factory):
     async with session_factory() as session:
         yield session
-    await engine.dispose()
 
 
 @pytest.fixture

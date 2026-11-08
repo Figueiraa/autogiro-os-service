@@ -14,7 +14,9 @@ from app.application.use_cases.service_order import (
     ListServiceOrdersUseCase,
     OpenServiceOrderUseCase,
 )
+from app.domain.exceptions import NotFoundError
 from app.domain.value_objects.service_order_status import ServiceOrderStatus
+from app.infrastructure.composition import build_orchestrator
 from app.infrastructure.config import settings
 from app.infrastructure.database import get_db
 from app.infrastructure.gateways.part_catalog import DisabledPartCatalog, HttpPartCatalog
@@ -25,6 +27,10 @@ from app.infrastructure.observability.metrics import (
     record_status_transition,
 )
 from app.infrastructure.persistence.repositories.client_repository import SqlAlchemyClientRepository
+from app.infrastructure.persistence.repositories.saga_repository import (
+    SqlAlchemySagaRepository,
+    SqlAlchemyUnitOfWork,
+)
 from app.infrastructure.persistence.repositories.service_order_repository import (
     SqlAlchemyServiceOrderRepository,
 )
@@ -36,6 +42,7 @@ from app.infrastructure.security.jwt_tokens import Principal
 from app.interfaces.http.dependencies import get_current_principal
 from app.interfaces.http.schemas.service_order_schema import (
     AverageExecutionTimeResponse,
+    SagaResponse,
     ServiceOrderCreate,
     ServiceOrderPublicStatus,
     ServiceOrderResponse,
@@ -86,6 +93,16 @@ async def get_history(order_id: int, db: AsyncSession = Depends(get_db), _=Depen
     return order.history
 
 
+@router.get("/{order_id}/saga", response_model=SagaResponse)
+async def get_saga(order_id: int, db: AsyncSession = Depends(get_db), _=Depends(get_current_principal)):
+    """Estado da Saga da OS: etapa atual, situação de cada etapa e das compensações."""
+    await GetServiceOrderUseCase(_repository(db)).execute(order_id)
+    saga = await SqlAlchemySagaRepository(db).get_by_order(order_id)
+    if saga is None:
+        raise NotFoundError("Saga da ordem de serviço", order_id)
+    return SagaResponse.from_domain(saga)
+
+
 @router.post("", response_model=ServiceOrderResponse, status_code=status.HTTP_201_CREATED)
 async def create_order(
     data: ServiceOrderCreate,
@@ -98,6 +115,8 @@ async def create_order(
         SqlAlchemyVehicleRepository(db),
         SqlAlchemyServiceTypeRepository(db),
         part_catalog,
+        build_orchestrator(db, notify=False),
+        SqlAlchemyUnitOfWork(db),
     )
     order = await use_case.execute(
         OpenServiceOrderInput(
