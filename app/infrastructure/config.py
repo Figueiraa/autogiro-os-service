@@ -14,6 +14,28 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     JWT_ISSUER: str = "autogiro-auth"
 
+    # Banco próprio do serviço. Em produção, o PostgreSQL do Neon (driver asyncpg);
+    # localmente, o PostgreSQL do docker-compose.
+    DATABASE_URL: str = "sqlite+aiosqlite:///./os-service.db"
+
+    # Consulta síncrona ao catálogo de peças do Execution Service na abertura da OS.
+    # Sem URL configurada, a validação é pulada e fica a cargo da Saga.
+    EXECUTION_SERVICE_URL: str | None = None
+    EXECUTION_SERVICE_TIMEOUT_SECONDS: float = 2.0
+
+    # Notificações de mudança de status da OS.
+    # auto  -> e-mail se SMTP_HOST estiver definido, senão log
+    # email -> força o canal de e-mail (SMTP)
+    # log   -> força o canal de log estruturado
+    NOTIFICATION_CHANNEL: str = "auto"
+    SMTP_HOST: str | None = None
+    SMTP_PORT: int = 587
+    SMTP_USER: str | None = None
+    SMTP_PASSWORD: str | None = None
+    SMTP_FROM: str = "no-reply@autogiro.com.br"
+    SMTP_USE_TLS: bool = True
+    SMTP_TIMEOUT: int = 10
+
     LOG_LEVEL: str = "INFO"
     CORS_ORIGINS: str = "*"  # lista separada por vírgula; use origens explícitas em produção
 
