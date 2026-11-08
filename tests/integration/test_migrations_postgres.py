@@ -28,7 +28,12 @@ async def test_aplica_tudo_uma_vez_e_e_idempotente(banco_limpo):
     primeira = await migrate(POSTGRES_URL)
     segunda = await migrate(POSTGRES_URL)
 
-    assert primeira == ["001_schema_inicial.sql", "002_contrato_autenticacao.sql", "003_dados_de_demonstracao.sql"]
+    assert primeira == [
+        "001_schema_inicial.sql",
+        "002_contrato_autenticacao.sql",
+        "003_dados_de_demonstracao.sql",
+        "004_saga.sql",
+    ]
     assert segunda == []
 
 

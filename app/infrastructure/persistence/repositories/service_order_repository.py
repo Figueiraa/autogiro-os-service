@@ -44,10 +44,12 @@ class SqlAlchemyServiceOrderRepository(ServiceOrderRepositoryPort):
         )
         return result.scalar_one_or_none()
 
-    async def add(self, order: ServiceOrder) -> ServiceOrder:
+    async def add(self, order: ServiceOrder, commit: bool = True) -> ServiceOrder:
+        """Grava a OS. Com `commit=False`, só envia ao banco (flush) e deixa a transação
+        aberta, para a abertura da OS e o início da Saga ficarem na mesma transação."""
         model = to_model(order)
         self._db.add(model)
-        await self._db.commit()
+        await self._finish(commit)
         return to_domain(await self._get_model(model.id))
 
     async def get_by_id(self, order_id: int) -> ServiceOrder | None:
@@ -64,7 +66,7 @@ class SqlAlchemyServiceOrderRepository(ServiceOrderRepositoryPort):
         result = await self._db.execute(query)
         return [to_domain(model) for model in result.scalars().all()]
 
-    async def update(self, order: ServiceOrder) -> ServiceOrder:
+    async def update(self, order: ServiceOrder, commit: bool = True) -> ServiceOrder:
         model = await self._get_model(order.id)
         model.status = order.status
         model.notes = order.notes
@@ -89,8 +91,14 @@ class SqlAlchemyServiceOrderRepository(ServiceOrderRepositoryPort):
             if change.id is None:
                 model.history.append(history_to_model(change))
 
-        await self._db.commit()
+        await self._finish(commit)
         return to_domain(await self._get_model(order.id))
+
+    async def _finish(self, commit: bool) -> None:
+        if commit:
+            await self._db.commit()
+        else:
+            await self._db.flush()
 
     async def count(self) -> int:
         result = await self._db.execute(select(func.count(ServiceOrderModel.id)))

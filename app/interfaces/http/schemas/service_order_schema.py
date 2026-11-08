@@ -2,6 +2,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field
 
+from app.domain.entities.saga import Saga, SagaState, SagaStep, StepStatus
 from app.domain.value_objects.service_order_status import ServiceOrderStatus
 
 
@@ -97,3 +98,46 @@ class AverageExecutionTimeResponse(BaseModel):
     total_completed: int
 
     model_config = {"from_attributes": True}
+
+
+class SagaStepResponse(BaseModel):
+    step: SagaStep
+    status: StepStatus
+    command: str | None
+    attempts: int
+    last_sent_at: datetime | None
+    finished_at: datetime | None
+
+
+class SagaResponse(BaseModel):
+    saga_id: str
+    order_id: int
+    state: SagaState
+    current_step: SagaStep | None
+    failure_reason: str | None
+    started_at: datetime | None
+    finished_at: datetime | None
+    steps: list[SagaStepResponse]
+
+    @classmethod
+    def from_domain(cls, saga: Saga) -> "SagaResponse":
+        return cls(
+            saga_id=saga.id,
+            order_id=saga.order_id,
+            state=saga.state,
+            current_step=saga.current_step,
+            failure_reason=saga.failure_reason,
+            started_at=saga.started_at,
+            finished_at=saga.finished_at,
+            steps=[
+                SagaStepResponse(
+                    step=record.step,
+                    status=record.status,
+                    command=record.command,
+                    attempts=record.attempts,
+                    last_sent_at=record.last_sent_at,
+                    finished_at=record.finished_at,
+                )
+                for record in saga.steps.values()
+            ],
+        )
