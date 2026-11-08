@@ -156,6 +156,54 @@ TEST_RABBITMQ_URL=amqp://guest:guest@localhost:5672/ pytest
 
 O `JWT_SECRET` é obrigatório e não tem valor padrão no código: o serviço não sobe sem ele.
 
+### Cenários de negócio (BDD)
+
+Os cenários da Saga estão escritos em Gherkin, em português, em
+[`tests/bdd/features/saga_ordem_de_servico.feature`](tests/bdd/features/saga_ordem_de_servico.feature):
+
+| Cenário | O que comprova |
+|---|---|
+| Caminho feliz, da abertura à entrega | Cada comando sai para o serviço certo e cada evento avança a OS até `ENTREGUE` |
+| Peça indisponível | A OS é cancelada sem compensações, porque nada chegou a ser feito |
+| Orçamento recusado | A reserva de peças é liberada e a cobrança, cancelada |
+| Pagamento recusado | Mesmas compensações, com o motivo `PAGAMENTO_RECUSADO` |
+| Oficina lotada depois do pagamento | A cobrança é cancelada com estorno do valor pago |
+
+Os passos usam a API real do serviço e o orquestrador de verdade; só as respostas do Execution e
+do Billing são simuladas, publicando os mesmos eventos que eles publicariam. Rodam junto com o resto
+da suíte, ou sozinhos com `pytest -m bdd`.
+
+### Plataforma completa, localmente
+
+[`docker-compose.ecossistema.yml`](docker-compose.ecossistema.yml) sobe os três microsserviços, cada um
+com o seu banco (PostgreSQL para OS e Billing, MongoDB em replica set para o Execution), e o RabbitMQ
+que liga a Saga:
+
+```bash
+cp .env.ecossistema.example .env.ecossistema   # JWT_SECRET e token de teste do Mercado Pago
+docker compose -f docker-compose.ecossistema.yml --env-file .env.ecossistema up -d
+```
+
+| Serviço | Endereço |
+|---|---|
+| OS Service | <http://localhost:8001/docs> |
+| Billing Service | <http://localhost:8002/docs> |
+| Execution Service | <http://localhost:8003/docs> |
+| Painel do RabbitMQ | <http://localhost:15672> (guest/guest) |
+
+A coleção [`docs/postman/autogiro-fluxo-completo.postman_collection.json`](docs/postman/autogiro-fluxo-completo.postman_collection.json)
+percorre o fluxo inteiro nos três serviços: abertura, Saga, orçamento, pagamento no Mercado Pago,
+execução na oficina e entrega. Ela guarda o id da OS e o link de pagamento em variáveis, então basta
+rodar as pastas na ordem.
+
+Falhas para experimentar com a plataforma no ar:
+
+- **Serviço fora do ar:** `docker compose ... stop execution-service` no meio da Saga. Os comandos
+  esperam na fila e a OS continua de onde parou quando o serviço volta.
+- **Oficina lotada:** `EXECUTION_QUEUE_CAPACITY=0` no `.env.ecossistema`. Depois do pagamento, a OS é
+  cancelada e a cobrança, estornada.
+- **Mensagem inválida:** cai em `os.saga-events.dlq` depois das tentativas, sem travar a fila.
+
 ## Pipeline (`.github/workflows/ci-cd.yml`)
 
 | Job | O que faz | Bloqueia o merge? |
