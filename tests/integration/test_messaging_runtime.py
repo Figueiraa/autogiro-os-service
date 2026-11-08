@@ -29,12 +29,14 @@ async def _abrir_os(auth_client) -> dict:
 class PublicadorFalso:
     def __init__(self, falhar=False):
         self.publicadas = []
+        self.cabecalhos = []
         self.falhar = falhar
 
-    async def __call__(self, exchange, routing_key, body, *, message_id, message_type):
+    async def __call__(self, exchange, routing_key, body, *, message_id, message_type, headers=None):
         if self.falhar:
             raise ConnectionError("broker fora do ar")
         self.publicadas.append((exchange, routing_key, json.loads(body), message_type))
+        self.cabecalhos.append(headers)
 
 
 class TestOutbox:
@@ -48,6 +50,19 @@ class TestOutbox:
         exchange, rota, corpo, tipo = publicador.publicadas[0]
         assert (exchange, rota, tipo) == ("autogiro.commands", "execution.reservar-pecas", "ReservarPecas")
         assert corpo["order_id"] == ordem["id"]
+
+    async def test_publica_com_o_trace_em_que_a_mensagem_foi_criada(self, auth_client, session_factory, db):
+        await _abrir_os(auth_client)
+        traceparent = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+        linha = (await db.execute(select(OutboxMessage))).scalar_one()
+        linha.trace_context = json.dumps({"traceparent": traceparent})
+        await db.commit()
+        publicador = PublicadorFalso()
+
+        await publish_pending(session_factory, publicador)
+
+        # O trace da requisição continua no cabeçalho da mensagem publicada.
+        assert "0af7651916cd43dd8448eb211c80319c" in publicador.cabecalhos[0]["traceparent"]
 
     async def test_mensagem_continua_pendente_se_o_broker_falhar(self, auth_client, session_factory, db):
         await _abrir_os(auth_client)

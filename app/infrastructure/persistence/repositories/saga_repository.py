@@ -13,6 +13,7 @@ from sqlalchemy.orm import selectinload
 from app.application.messages import Envelope
 from app.application.ports.saga import InboxPort, OutboxPort, SagaRepositoryPort, UnitOfWorkPort
 from app.domain.entities.saga import Saga, SagaState, SagaStepRecord
+from app.infrastructure.observability.tracing import dump_context
 from app.infrastructure.persistence.models.saga_model import (
     OutboxMessage,
     ProcessedMessage,
@@ -115,6 +116,7 @@ class SqlAlchemyOutbox(OutboxPort):
                 exchange=envelope.exchange,
                 routing_key=envelope.routing_key,
                 body=envelope.to_json(),
+                trace_context=dump_context(),
             )
         )
 

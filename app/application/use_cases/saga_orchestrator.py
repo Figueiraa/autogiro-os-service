@@ -34,6 +34,9 @@ class HandleResult:
     # Status aplicados na OS e há quantos segundos ela estava no anterior (para métricas).
     transitions: list[tuple[ServiceOrderStatus, float | None]] = field(default_factory=list)
     note: str | None = None
+    # Estado da Saga depois do evento (para observabilidade).
+    saga_state: str | None = None
+    failure_reason: str | None = None
 
 
 class SagaOrchestrator:
@@ -99,6 +102,8 @@ class SagaOrchestrator:
         else:
             logger.info("Saga %s: %s", saga.id, decision.note)
 
+        result.saga_state = saga.state.value
+        result.failure_reason = saga.failure_reason
         await self._inbox.mark_processed(envelope.message_id)
         await self._uow.commit()
         await self._notify(order, result.transitions)
