@@ -14,12 +14,25 @@ resource "neon_project" "os" {
   }
 }
 
-# Usuário da Lambda de autenticação. As permissões (só a view auth.clients) são
-# dadas pela migration 002 do serviço, que roda depois deste apply.
-resource "neon_role" "auth_reader" {
-  project_id = neon_project.os.id
-  branch_id  = neon_project.os.default_branch_id
-  name       = var.auth_role
+# Usuário da Lambda de autenticação, criado pelo próprio usuário do serviço e
+# não pela API do Neon. Papel criado pela API entra no grupo `neon_superuser`,
+# que lê todas as tabelas do banco (pg_read_all_data): a Lambda enxergaria
+# veículos e ordens de serviço, não só a view de quatro colunas. Criado pelo
+# usuário do serviço, o papel não herda nada, e o serviço pode administrá-lo.
+#
+# As permissões (só a view auth.clients) são dadas pelas migrations 002 e 006,
+# que rodam depois deste apply.
+resource "random_password" "auth_reader" {
+  length  = 32
+  special = false # vai dentro da URL de conexão
+}
+
+resource "postgresql_role" "auth_reader" {
+  name             = var.auth_role
+  login            = true
+  password         = random_password.auth_reader.result
+  search_path      = ["auth"]
+  connection_limit = 10
 }
 
 data "neon_branch_role_password" "app" {

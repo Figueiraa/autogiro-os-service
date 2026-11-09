@@ -34,6 +34,7 @@ async def test_aplica_tudo_uma_vez_e_e_idempotente(banco_limpo):
         "003_dados_de_demonstracao.sql",
         "004_saga.sql",
         "005_contexto_de_rastreamento.sql",
+        "006_permissoes_do_auth_reader.sql",
     ]
     assert segunda == []
     colunas = {

@@ -23,7 +23,7 @@ output "auth_database_url" {
   value = format(
     "postgresql://%s:%s@%s/%s?sslmode=require&options=-csearch_path%%3Dauth",
     var.auth_role,
-    neon_role.auth_reader.password,
+    random_password.auth_reader.result,
     neon_project.os.database_host,
     var.database_name,
   )
