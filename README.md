@@ -14,11 +14,60 @@
 | **Banco** | PostgreSQL (Neon) |
 | **Comunicação** | REST pelo Kong (borda) · RabbitMQ (comandos e eventos da Saga) |
 
+## Documentação
+
+A arquitetura da plataforma fica em [`docs/`](docs/README.md), neste repositório, porque é
+aqui que mora o orquestrador da Saga.
+
+| Documento | Conteúdo |
+|---|---|
+| [Visão geral](docs/arquitetura/visao-geral.md) | Diagrama geral, os três serviços e as estratégias de comunicação |
+| [Posse dos dados](docs/arquitetura/posse-dos-dados.md) | Dono de cada dado, modelo de cada banco e o que é cópia |
+| [Máquinas de estado](docs/arquitetura/maquina-de-estados.md) | OS, Saga, orçamento, pagamento, reserva e execução |
+| [Saga](docs/arquitetura/saga.md) | Etapas, compensações, idempotência, isolamento, falhas e sequências |
+| [Mensageria](docs/arquitetura/mensageria.md) | Envelope, topologia no RabbitMQ, catálogo de mensagens, retry e DLQ |
+
+Decisões de arquitetura:
+[ADR-005](docs/adr/ADR-005-tres-microsservicos.md) (três microsserviços) ·
+[ADR-006](docs/adr/ADR-006-banco-por-servico.md) (banco por serviço) ·
+[ADR-007](docs/adr/ADR-007-rest-na-borda-rabbitmq-entre-servicos.md) (REST na borda, RabbitMQ entre serviços) ·
+[ADR-008](docs/adr/ADR-008-saga-orquestrada.md) (Saga orquestrada) ·
+[ADR-009](docs/adr/ADR-009-confiabilidade-das-mensagens.md) (confiabilidade das mensagens) ·
+[ADR-011](docs/adr/ADR-011-rastreamento-opentelemetry-new-relic.md) (OpenTelemetry e New Relic) ·
+[ADR-013](docs/adr/ADR-013-lambda-no-contexto-de-atendimento.md) (Lambda no contexto de Atendimento).
+O [ADR-010](https://github.com/Figueiraa/autogiro-billing-service/blob/main/docs/adr/ADR-010-mercado-pago-checkout-pro.md)
+fica no Billing, e o [ADR-012](https://github.com/Figueiraa/autogiro-infra-k8s/blob/main/docs/adr/ADR-012-kubernetes-no-eks.md)
+e as [APIs e rotas no Kong](https://github.com/Figueiraa/autogiro-infra-k8s/blob/main/docs/apis-e-gateway.md),
+no `autogiro-infra-k8s`.
+
 ## Estrutura
 
 Clean Architecture (domínio, aplicação, infraestrutura e interfaces), sondas de saúde,
 métricas Prometheus, logs JSON, validação do JWT emitido pelo `autogiro-auth` e pipeline com
 testes, SonarCloud e imagem Docker.
+
+```mermaid
+flowchart LR
+    K[Kong · JWT] --> API
+    subgraph OS["OS Service"]
+        API[API REST<br/>interfaces/http] --> UC[Casos de uso]
+        UC -- "abre a OS e<br/>inicia a Saga" --> ORQ[SagaOrchestrator]
+        CONS[Consumidor<br/>os.saga-events] --> ORQ
+        ORQ --> DOM[Domínio<br/>ServiceOrder · Saga]
+        PUB[Publicador do outbox<br/>a cada 1 s]
+        RET[Reenvio de etapas<br/>paradas · a cada 30 s]
+    end
+    UC & ORQ & PUB & RET --> DB[(PostgreSQL · Neon<br/>cadastros, OS, Saga,<br/>outbox, processed_messages)]
+    API -. "GET /api/v1/parts/{id}<br/>timeout 2 s" .-> EX[Execution Service]
+    PUB -- comandos --> CMD{{autogiro.commands}}
+    EVT{{autogiro.events}} -- "execution.# · billing.#" --> CONS
+    API & CONS & PUB -. "traces OTLP" .-> NR[New Relic]
+```
+
+A regra da Saga é uma decisão pura no domínio (`app/domain/entities/saga.py`): recebe um evento
+e devolve os comandos e os status a aplicar. O `SagaOrchestrator` (`app/application/use_cases/`)
+executa a decisão numa transação; o consumidor, o publicador do outbox e o reenvio de etapas
+paradas rodam junto com a API (`app/infrastructure/messaging/`).
 
 ## API
 
@@ -57,25 +106,43 @@ Execution Service; orçamento e pagamento, ao Billing Service. Aqui ficam o pedi
 que voltam de lá (nome e preço da peça, total do orçamento, link de pagamento).
 
 Ao abrir a OS, as peças são conferidas no catálogo do Execution Service
-(`EXECUTION_SERVICE_URL`, com timeout de 2 s). Se ele não responder, a OS é aberta assim mesmo
-e a peça é validada depois, no fluxo da OS.
+(`EXECUTION_SERVICE_URL`, com timeout de 2 s). Peça que não existe no catálogo recusa a abertura
+com `422`. Se o Execution não responder, a OS é aberta assim mesmo e a peça é validada depois,
+na reserva feita pela Saga.
 
 ## Saga
 
 O fluxo da OS atravessa os três serviços e cada etapa é uma transação local num banco
-diferente. A consistência é garantida por uma **Saga orquestrada**, com o orquestrador dentro
-deste serviço.
+diferente. Não há transação distribuída: se uma etapa falha, as anteriores são desfeitas por
+**compensação**.
 
-### Por que orquestração
+### Estratégia: Saga orquestrada
+
+A consistência é garantida por uma **Saga orquestrada**, com o orquestrador dentro deste
+serviço. Ele envia **comandos** aos participantes (Execution e Billing) pelo RabbitMQ, recebe
+os **eventos** de resposta e decide o próximo passo ou as compensações. Os participantes não
+conhecem a Saga: recebem um comando, fazem uma transação local e respondem com um evento.
+
+### Por que orquestração, e não coreografia
+
+Na coreografia não há coordenador: cada serviço reage aos eventos dos outros. Ela foi
+descartada por quatro motivos:
 
 - **O fluxo tem 6 etapas, duas esperas pelo cliente e 8 caminhos de falha.** Com coreografia,
   a regra de "o que desfazer quando o pagamento é recusado" ficaria espalhada entre Billing e
-  Execution. Com um orquestrador, ela é uma linha de uma tabela, testada num lugar só.
+  Execution, cada um ouvindo as falhas do outro e decidindo sozinho se compensa. Com um
+  orquestrador, ela é uma linha de uma tabela, testada num lugar só.
 - **Este serviço já é o dono do ciclo de vida da OS:** o status da OS, o estado da Saga e o
   próximo comando mudam na **mesma transação local**, sem um quarto serviço para manter.
-- **Visibilidade:** `GET /service-orders/{id}/saga` mostra em que ponto está qualquer OS.
-- O orquestrador **só coordena**: como reservar, orçar ou estornar é regra dos participantes,
-  que recebem comandos e respondem com eventos sem conhecer a Saga.
+- **Visibilidade:** `GET /service-orders/{id}/saga` mostra em que ponto está qualquer OS. Na
+  coreografia, seria preciso reconstruir o estado pelos eventos dos três serviços.
+- **Menos acoplamento entre participantes:** Billing e Execution não se conhecem; só o
+  orquestrador conhece os dois. Na coreografia, cada serviço depende dos eventos dos outros, com
+  risco de dependência cíclica.
+
+O custo assumido é concentrar o fluxo num serviço. Para ele não virar um "serviço Deus", o
+orquestrador **só coordena**: como reservar, orçar ou estornar é regra dos participantes. A
+comparação completa está no [ADR-008](docs/adr/ADR-008-saga-orquestrada.md).
 
 ### Etapas e compensações
 
@@ -94,7 +161,32 @@ comandos enviados em paralelo:
 - `LiberarPecas`, se as peças chegaram a ser reservadas;
 - `CancelarCobranca`, se o orçamento chegou a ser gerado (o Billing estorna se já houve pagamento).
 
-A OS só vai para `CANCELADA` quando **todas** as compensações confirmam.
+A OS só vai para `CANCELADA` quando **todas** as compensações confirmam. Se o Mercado Pago
+recusar o estorno (o sandbox recusa estorno por API), o Billing confirma a compensação com
+`estorno_pendente: true` e o estorno é feito pelo painel do Mercado Pago, sem travar a Saga.
+Detalhes, matriz de compensações e diagramas de sequência em [docs/arquitetura/saga.md](docs/arquitetura/saga.md).
+
+### Comandos publicados e eventos consumidos
+
+**Comandos publicados** em `autogiro.commands` (pelo outbox):
+
+| Comando | Para | Routing key |
+|---|---|---|
+| `ReservarPecas` | Execution | `execution.reservar-pecas` |
+| `LiberarPecas` (compensação) | Execution | `execution.liberar-pecas` |
+| `EnfileirarExecucao` | Execution | `execution.enfileirar-execucao` |
+| `GerarOrcamento` | Billing | `billing.gerar-orcamento` |
+| `CancelarCobranca` (compensação) | Billing | `billing.cancelar-cobranca` |
+
+**Eventos consumidos** da fila `os.saga-events` (ligada a `autogiro.events` por `execution.#`
+e `billing.#`):
+
+| Origem | Eventos |
+|---|---|
+| Execution | `PecasReservadas`, `PecasIndisponiveis`, `PecasLiberadas`, `ExecucaoEnfileirada`, `EnfileiramentoRecusado`, `DiagnosticoIniciado`, `ReparoIniciado`, `ExecucaoFinalizada`, `ExecucaoCancelada` |
+| Billing | `OrcamentoGerado`, `OrcamentoFalhou`, `OrcamentoAprovado`, `OrcamentoRecusado`, `OrcamentoExpirado`, `PagamentoConfirmado`, `PagamentoRecusado`, `PagamentoExpirado`, `CobrancaCancelada` |
+
+Payloads e o catálogo completo em [docs/arquitetura/mensageria.md](docs/arquitetura/mensageria.md).
 
 ### Confiabilidade
 
@@ -105,7 +197,7 @@ A OS só vai para `CANCELADA` quando **todas** as compensações confirmam.
 | Trava na linha da Saga | Duas confirmações da mesma Saga em réplicas diferentes não se sobrepõem |
 | Reenvio de etapa parada | Comando sem resposta há 120 s é reenviado; o participante é idempotente por OS |
 | Retry com atraso e DLQ | Falha técnica: 3 novas tentativas a cada 5 s, depois a fila `os.saga-events.dlq` |
-| Bloqueio semântico | Enquanto a OS está `EM_CANCELAMENTO`, nenhuma operação de negócio a aceita |
+| Bloqueio semântico | De `EM_CANCELAMENTO` a OS só vai para `CANCELADA`: a entrega exige `FINALIZADA` e eventos de avanço de uma Saga que está compensando são ignorados |
 
 ### Mensageria (RabbitMQ)
 
@@ -129,7 +221,7 @@ Métricas Prometheus em `GET /metrics` (raspadas pelo agente do New Relic no clu
 | `NEW_RELIC_LICENSE_KEY` | License key de ingestão, enviada no cabeçalho `api-key` |
 | `DEPLOYMENT_ENVIRONMENT` | Ambiente nos traces (`local`, `producao`) |
 
-Como uma OS vira **um trace só** entre os serviços:
+Como cada trecho do fluxo de uma OS vira **um trace só** entre os serviços:
 
 - HTTP de entrada e de saída (httpx, inclusive a consulta ao catálogo de peças do Execution) e o PostgreSQL (SQLAlchemy) são instrumentados automaticamente; as chamadas HTTP levam
   o cabeçalho `traceparent` (W3C).
@@ -142,6 +234,10 @@ Como uma OS vira **um trace só** entre os serviços:
   durante o processamento de uma mensagem, `saga_id`, `order_id` e `message_type`.
 - Consultas ao banco feitas pelos laços em segundo plano (outbox, reenvio de etapas paradas, sondas de saúde) não abrem
   trace próprio: só aparecem dentro de uma requisição ou mensagem.
+- A Saga inteira não é um trace só: cada ação humana (aprovar o orçamento, o mecânico avançar a
+  execução) é uma requisição nova, e o pagamento é confirmado pelo monitor do Billing, fora de
+  uma requisição. Os trechos de uma mesma OS se ligam pelo `autogiro.saga_id` e pelo
+  `autogiro.order_id` ([ADR-011](docs/adr/ADR-011-rastreamento-opentelemetry-new-relic.md)).
 
 O painel **AutoGiro — Saga e rastreamento** e o alerta de mensagem na DLQ ficam no
 [autogiro-infra-k8s](https://github.com/Figueiraa/autogiro-infra-k8s), em Terraform.
@@ -155,9 +251,10 @@ uma única vez, em ordem.
 | Migration | Conteúdo |
 |---|---|
 | `001_schema_inicial.sql` | Clientes, veículos, catálogo, ordens de serviço e histórico de status |
-| `002_contrato_autenticacao.sql` | View `auth.clients` e usuário somente leitura para a Lambda de autenticação |
+| `002_contrato_autenticacao.sql` | View `auth.clients` e permissões do usuário somente leitura `auth_reader` da Lambda de autenticação (no Neon, o usuário é criado pelo `terraform/` e o `search_path` vai na URL de conexão, saída `auth_database_url`) |
 | `003_dados_de_demonstracao.sql` | Clientes, veículos e serviços de exemplo |
 | `004_saga.sql` | Estado das Sagas, outbox e mensagens processadas |
+| `005_contexto_de_rastreamento.sql` | Coluna `trace_context` no outbox: o contexto do trace em que cada mensagem nasceu |
 
 ## Como rodar
 
@@ -285,8 +382,29 @@ publicação, e desligada pelo script que o destrói: com o cluster desligado o 
 
 ## Qualidade e cobertura
 
-- **Painel do SonarCloud:** <https://sonarcloud.io/summary/overall?id=Figueiraa_autogiro-os-service> (quality gate, cobertura, bugs, vulnerabilidades e code smells).
+[![Quality Gate](https://sonarcloud.io/api/project_badges/measure?project=Figueiraa_autogiro-os-service&metric=alert_status)](https://sonarcloud.io/summary/overall?id=Figueiraa_autogiro-os-service)
+[![Cobertura](https://sonarcloud.io/api/project_badges/measure?project=Figueiraa_autogiro-os-service&metric=coverage)](https://sonarcloud.io/component_measures?id=Figueiraa_autogiro-os-service&metric=coverage)
+[![Bugs](https://sonarcloud.io/api/project_badges/measure?project=Figueiraa_autogiro-os-service&metric=bugs)](https://sonarcloud.io/project/issues?id=Figueiraa_autogiro-os-service&types=BUG)
+[![Vulnerabilidades](https://sonarcloud.io/api/project_badges/measure?project=Figueiraa_autogiro-os-service&metric=vulnerabilities)](https://sonarcloud.io/project/issues?id=Figueiraa_autogiro-os-service&types=VULNERABILITY)
+[![Code smells](https://sonarcloud.io/api/project_badges/measure?project=Figueiraa_autogiro-os-service&metric=code_smells)](https://sonarcloud.io/project/issues?id=Figueiraa_autogiro-os-service&types=CODE_SMELL)
+
+Cobertura de **98,7%** na `main`, com 317 testes, quality gate aprovado e nenhum bug,
+vulnerabilidade ou code smell aberto. A pipeline exige no mínimo 80% (`--cov-fail-under=80`) e o
+quality gate do SonarCloud bloqueia o merge.
+
+![Painel do SonarCloud](docs/img/sonarcloud.png)
+
+- **Painel do SonarCloud:** <https://sonarcloud.io/summary/overall?id=Figueiraa_autogiro-os-service> (os badges acima são atualizados a cada análise).
 - **Relatório de cada execução:** aba *Summary* da pipeline no GitHub Actions, com o quadro de testes e cobertura, e o artefato `test-and-coverage-reports` (JUnit, `coverage.xml` e HTML).
+
+## Swagger e Postman
+
+- **Swagger:** `http://localhost:8001/docs` com o serviço rodando localmente; no cluster,
+  `kubectl -n autogiro port-forward svc/os-service 8001:80` e o mesmo endereço.
+- [`docs/openapi.json`](docs/openapi.json): a especificação OpenAPI exportada da aplicação.
+- [`docs/postman/os-service.postman_collection.json`](docs/postman/os-service.postman_collection.json): todas as rotas do serviço,
+  com as variáveis `base_url`, `token` e os ids usados nos caminhos.
+- [`docs/postman/autogiro-fluxo-completo.postman_collection.json`](docs/postman/autogiro-fluxo-completo.postman_collection.json): o fluxo inteiro da OS pelos três serviços, da abertura à entrega.
 
 ## Repositórios da plataforma
 
