@@ -27,23 +27,27 @@ proíbe, com destaque, um serviço acessar o banco de outro.
    GRANT SELECT ON auth.clients TO auth_reader;
    ```
 3. O usuário `auth_reader` é criado de formas diferentes conforme o ambiente:
-   - **No Neon**, pela API do Neon, via Terraform do próprio serviço (recurso
-     `neon_role.auth_reader` em [`terraform/main.tf`](../../terraform/main.tf)), que gera a
-     senha. O usuário da aplicação não tem permissão para alterar um papel criado assim, então
-     o `search_path=auth` vai **na URL de conexão** da Lambda: a saída `auth_database_url` do
-     [`terraform/outputs.tf`](../../terraform/outputs.tf) monta
-     `postgresql://auth_reader:…@…/autogiro_os?sslmode=require&options=-csearch_path%3Dauth`.
-   - **Localmente e no CI**, a migration cria o papel (`NOLOGIN`) se ele não existir e faz
-     `ALTER ROLE auth_reader SET search_path = auth`. No Neon esse `ALTER ROLE` falha por falta
-     de privilégio; a migration captura o erro (`insufficient_privilege`), registra um aviso e
-     segue.
+   - **No Neon**, pelo **usuário do próprio serviço**, via Terraform (provider `postgresql`,
+     recurso `postgresql_role.auth_reader` em [`terraform/main.tf`](../../terraform/main.tf)),
+     com senha aleatória e `search_path = auth`. **Não** pela API do Neon: todo papel criado
+     pela API entra no grupo `neon_superuser`, que tem `pg_read_all_data` e lê todas as
+     tabelas do banco. Foi o que aconteceu na primeira versão: o `auth_reader` conseguia ler
+     veículos e ordens de serviço, e o usuário do serviço não tinha permissão para tirá-lo do
+     grupo. Criado pelo usuário do serviço, o papel não herda nada.
+   - **Localmente e no CI**, a migration cria o papel (`NOLOGIN`) se ele não existir.
+
+   A migration [`006_permissoes_do_auth_reader.sql`](../../migrations/006_permissoes_do_auth_reader.sql)
+   reaplica as permissões (um papel recriado não herda as do anterior). O `search_path=auth`
+   também vai na URL de conexão da Lambda (saída `auth_database_url` do
+   [`terraform/outputs.tf`](../../terraform/outputs.tf)), como garantia.
 4. Com o `search_path` apontando para `auth`, a consulta atual da Lambda (`FROM clients`) lê
    a view `auth.clients`, **sem mudar o código** do `autogiro-auth`; só a variável
    `DATABASE_URL` muda.
 
-As permissões que a migration concede ao `auth_reader` se limitam à view: nada de veículos,
-OS, e-mail, telefone ou endereço do cliente. E **nenhum dos 3 microsserviços** acessa o banco
-de outro.
+O `auth_reader` enxerga só a view: nada de veículos, OS, e-mail, telefone ou endereço do
+cliente. Conferido no banco: `has_table_privilege('auth_reader', 'public.service_orders',
+'SELECT')` é `false`, e um `SELECT` em `public.vehicles` é negado. E **nenhum dos 3
+microsserviços** acessa o banco de outro.
 
 ## Consequências
 
@@ -57,8 +61,8 @@ de outro.
 - É um acesso a banco **fora** do dono do código. Precisa ficar documentado, porque um leitor
   apressado pode tomá-lo como violação da regra de que nenhum serviço acessa o banco de outro.
 - Mudar a view exige coordenar com o `autogiro-auth`.
-- No Neon, o `search_path` depende da URL de conexão estar certa: sem o parâmetro `options`,
-  o nome `clients` deixa de resolver para a view `auth.clients`.
+- O papel da Lambda não pode ser criado pela API do Neon (herdaria leitura de tudo); depende
+  do provider `postgresql` do Terraform, conectado como o usuário do serviço.
 
 ## Alternativas consideradas
 

@@ -251,10 +251,11 @@ uma única vez, em ordem.
 | Migration | Conteúdo |
 |---|---|
 | `001_schema_inicial.sql` | Clientes, veículos, catálogo, ordens de serviço e histórico de status |
-| `002_contrato_autenticacao.sql` | View `auth.clients` e permissões do usuário somente leitura `auth_reader` da Lambda de autenticação (no Neon, o usuário é criado pelo `terraform/` e o `search_path` vai na URL de conexão, saída `auth_database_url`) |
+| `002_contrato_autenticacao.sql` | View `auth.clients` e permissões do usuário somente leitura `auth_reader` da Lambda de autenticação (no Neon, o usuário é criado pelo `terraform/` com o usuário do serviço, ver ADR-013) |
 | `003_dados_de_demonstracao.sql` | Clientes, veículos e serviços de exemplo |
 | `004_saga.sql` | Estado das Sagas, outbox e mensagens processadas |
 | `005_contexto_de_rastreamento.sql` | Coluna `trace_context` no outbox: o contexto do trace em que cada mensagem nasceu |
+| `006_permissoes_do_auth_reader.sql` | Reaplica as permissões do `auth_reader` só sobre a view (o papel do Neon passou a ser criado pelo usuário do serviço, sem herdar leitura de todo o banco) |
 
 ## Como rodar
 
