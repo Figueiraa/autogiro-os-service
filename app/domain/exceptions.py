@@ -27,3 +27,15 @@ class InvalidStatusTransitionError(BusinessRuleError):
         super().__init__(f"Transição de status inválida: '{current}' → '{target}'")
         self.current = current
         self.target = target
+
+
+class OutOfOrderEventError(DomainError):
+    """Evento da Saga chegou antes do evento que o precede.
+
+    Não é erro de negócio nem repetição: o evento deve voltar mais tarde (fila de
+    retry), quando o anterior já tiver sido processado.
+    """
+
+    def __init__(self, event_type: str, detail: str):
+        super().__init__(f"{event_type} chegou fora de ordem: {detail}")
+        self.event_type = event_type

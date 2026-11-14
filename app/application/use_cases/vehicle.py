@@ -80,4 +80,9 @@ class DeleteVehicleUseCase:
         vehicle = await self._repo.get_by_id(vehicle_id)
         if not vehicle:
             raise NotFoundError("Veículo", vehicle_id)
+        # O banco recusa a exclusão (RESTRICT); checar antes dá uma mensagem clara.
+        if await self._repo.is_referenced(vehicle_id):
+            raise ConflictError(
+                f"Veículo {vehicle_id} tem ordens de serviço vinculadas e não pode ser excluído"
+            )
         await self._repo.delete(vehicle_id)

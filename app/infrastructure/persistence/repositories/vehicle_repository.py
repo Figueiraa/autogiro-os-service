@@ -1,9 +1,12 @@
-from sqlalchemy import select
+from sqlalchemy import exists, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.ports.vehicle_repository import VehicleRepositoryPort
 from app.domain.entities.vehicle import Vehicle
+from app.domain.exceptions import ConflictError
 from app.infrastructure.persistence.mappers.vehicle_mapper import to_domain
+from app.infrastructure.persistence.models.service_order_model import ServiceOrder as ServiceOrderModel
 from app.infrastructure.persistence.models.vehicle_model import Vehicle as VehicleModel
 
 
@@ -54,8 +57,19 @@ class SqlAlchemyVehicleRepository(VehicleRepositoryPort):
         await self._db.refresh(model)
         return to_domain(model)
 
+    async def is_referenced(self, vehicle_id: int) -> bool:
+        query = select(exists().where(ServiceOrderModel.vehicle_id == vehicle_id))
+        return bool((await self._db.execute(query)).scalar())
+
     async def delete(self, vehicle_id: int) -> None:
         model = await self._get_model(vehicle_id)
         if model is not None:
             await self._db.delete(model)
-            await self._db.commit()
+            try:
+                await self._db.commit()
+            except IntegrityError as exc:
+                # Vínculo criado entre a verificação do caso de uso e a exclusão.
+                await self._db.rollback()
+                raise ConflictError(
+                    f"Veículo {vehicle_id} tem registros vinculados e não pode ser excluído"
+                ) from exc

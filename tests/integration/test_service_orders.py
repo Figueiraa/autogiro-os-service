@@ -1,5 +1,6 @@
 """Ordens de serviço pela API: abertura, consulta, histórico e entrega."""
 
+import re
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -62,6 +63,43 @@ async def _avancar(db, order_id: int, ate: ServiceOrderStatus, inicio: datetime 
     for passo, status in enumerate(caminho[: caminho.index(ate) + 1], start=1):
         ordem.transition_to(status, source="teste", now=momento + timedelta(minutes=10 * passo))
     await repo.update(ordem)
+
+
+class TestExclusaoDeCadastrosEmUso:
+    """O banco recusa a exclusão (RESTRICT): a API responde 409 com o motivo, não 500."""
+
+    async def test_cliente_com_veiculo_responde_409(self, auth_client):
+        ids = await _cadastros(auth_client)
+
+        r = await auth_client.delete(f"/api/v1/clients/{ids['client_id']}")
+
+        assert r.status_code == 409
+        assert "vinculados" in r.json()["detail"]
+        assert (await auth_client.get(f"/api/v1/clients/{ids['client_id']}")).status_code == 200
+
+    async def test_veiculo_com_ordem_de_servico_responde_409(self, auth_client):
+        ids = await _cadastros(auth_client)
+        await _abrir(auth_client, ids)
+
+        r = await auth_client.delete(f"/api/v1/vehicles/{ids['vehicle_id']}")
+
+        assert r.status_code == 409
+        assert "ordens de serviço vinculadas" in r.json()["detail"]
+
+    async def test_servico_usado_em_ordem_de_servico_responde_409(self, auth_client):
+        ids = await _cadastros(auth_client)
+        await _abrir(auth_client, ids)
+
+        r = await auth_client.delete(f"/api/v1/service-types/{ids['oleo']}")
+
+        assert r.status_code == 409
+        assert "já foi usado em ordens de serviço" in r.json()["detail"]
+
+    async def test_servico_sem_uso_continua_podendo_ser_excluido(self, auth_client):
+        ids = await _cadastros(auth_client)
+        await _abrir(auth_client, ids, items=[{"service_type_id": ids["oleo"]}])
+
+        assert (await auth_client.delete(f"/api/v1/service-types/{ids['freio']}")).status_code == 204
 
 
 class TestAbertura:
@@ -133,6 +171,16 @@ class TestAbertura:
         primeira = await _abrir(auth_client, ids)
         segunda = await _abrir(auth_client, ids)
         assert int(segunda["number"][-4:]) == int(primeira["number"][-4:]) + 1
+
+    async def test_numero_vem_do_id_da_os(self, auth_client):
+        # Único por construção: contar as OS existentes repetia o número em aberturas
+        # simultâneas (as duas contavam antes de qualquer uma gravar).
+        ids = await _cadastros(auth_client)
+
+        ordem = await _abrir(auth_client, ids)
+
+        assert re.fullmatch(r"OS\d{8}\d{4}", ordem["number"])
+        assert ordem["number"].endswith(f"{ordem['id']:04d}")
 
     async def test_exige_autenticacao(self, client):
         r = await client.post("/api/v1/service-orders", json={"vehicle_id": 1, "items": [{"service_type_id": 1}]})

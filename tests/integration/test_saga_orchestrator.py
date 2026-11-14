@@ -3,10 +3,14 @@
 import json
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from sqlalchemy import select
 
 from app.application.messages import Envelope
 from app.application.use_cases.saga_orchestrator import APPLIED, DUPLICATE, IGNORED
+from app.domain.entities.saga import SagaStep
+from app.domain.exceptions import InvalidStatusTransitionError, OutOfOrderEventError
+from app.domain.value_objects.service_order_status import ServiceOrderStatus
 from app.infrastructure.composition import build_orchestrator
 from app.infrastructure.persistence.models.saga_model import OutboxMessage, ProcessedMessage
 from app.infrastructure.persistence.repositories.saga_repository import SqlAlchemySagaRepository
@@ -217,14 +221,26 @@ class TestRobustez:
         )
         assert (await build_orchestrator(db, notify=False).handle(comando)).outcome == IGNORED
 
-    async def test_evento_fora_de_ordem_nao_muda_a_os(self, auth_client, db):
+    async def test_evento_adiantado_nao_muda_a_os_nem_e_marcado_como_processado(self, auth_client, db):
         ordem = await _abrir_os(auth_client)
         evento = _evento("PagamentoConfirmado", await _saga_id(db, ordem["id"]), ordem["id"])
 
-        resultado = await build_orchestrator(db, notify=False).handle(evento)
+        with pytest.raises(OutOfOrderEventError):
+            await build_orchestrator(db, notify=False).handle(evento)
+
+        assert (await _os(db, ordem["id"])).status.value == "RECEBIDA"
+        # Sem registro no inbox: quando voltar da fila de retry, ele será processado.
+        assert await db.get(ProcessedMessage, evento.message_id) is None
+
+    async def test_evento_de_etapa_ja_concluida_e_ignorado_e_registrado(self, auth_client, db):
+        ordem = await _abrir_os(auth_client)
+        orquestrador, saga_id = await _avancar(db, ordem, CAMINHO[:2])
+        atrasado = _evento("PecasReservadas", saga_id, ordem["id"], CAMINHO[0][1])
+
+        resultado = await orquestrador.handle(atrasado)
 
         assert resultado.outcome == IGNORED
-        assert (await _os(db, ordem["id"])).status.value == "RECEBIDA"
+        assert await db.get(ProcessedMessage, atrasado.message_id) is not None
 
     async def test_progresso_repetido_da_execucao_e_ignorado_na_os(self, auth_client, db):
         ordem = await _abrir_os(auth_client)
@@ -233,8 +249,81 @@ class TestRobustez:
 
         resultado = await orquestrador.handle(_evento("DiagnosticoIniciado", saga_id, ordem["id"]))
 
-        assert resultado.transitions == []
+        assert (resultado.outcome, resultado.transitions) == (IGNORED, [])
         assert (await _os(db, ordem["id"])).status.value == "EM_DIAGNOSTICO"
+
+    async def test_transicao_invalida_nao_e_engolida(self, auth_client, db):
+        # OS e Saga em desacordo (OS voltou a RECEBIDA): nada é gravado e o evento
+        # segue para retry/DLQ em vez de sumir com a Saga avançada e a OS parada.
+        ordem = await _abrir_os(auth_client)
+        orquestrador, saga_id = await _avancar(db, ordem, CAMINHO[:2])
+        repositorio = SqlAlchemyServiceOrderRepository(db)
+        os_ = await repositorio.get_by_id(ordem["id"])
+        os_.status = ServiceOrderStatus.RECEBIDA
+        await repositorio.update(os_)
+        evento = _evento("OrcamentoAprovado", saga_id, ordem["id"], CAMINHO[2][1])
+
+        with pytest.raises(InvalidStatusTransitionError):
+            await orquestrador.handle(evento)
+
+        saga = await SqlAlchemySagaRepository(db).get_by_order(ordem["id"])
+        assert saga.current_step.value == "AGUARDAR_APROVACAO"
+        assert await db.get(ProcessedMessage, evento.message_id) is None
+
+
+class TestEventosForaDeOrdem:
+    """Consumo paralelo (réplicas, prefetch, fila de retry): um evento pode chegar antes
+    do que o precede. Ele falha, volta pela fila de retry e é aplicado na vez certa."""
+
+    async def test_aprovacao_antes_do_orcamento_volta_e_e_aplicada_depois(self, auth_client, db):
+        ordem = await _abrir_os(auth_client)
+        orquestrador, saga_id = await _avancar(db, ordem, CAMINHO[:1])
+        aprovado = _evento("OrcamentoAprovado", saga_id, ordem["id"], CAMINHO[2][1], "billing-service")
+        pago = _evento("PagamentoConfirmado", saga_id, ordem["id"], CAMINHO[3][1], "billing-service")
+
+        with pytest.raises(OutOfOrderEventError):
+            await orquestrador.handle(aprovado)
+        with pytest.raises(OutOfOrderEventError):
+            await orquestrador.handle(pago)
+        gerado = _evento("OrcamentoGerado", saga_id, ordem["id"], CAMINHO[1][1], "billing-service")
+        assert (await orquestrador.handle(gerado)).outcome == APPLIED
+        # As mesmas mensagens, de volta da fila de retry.
+        assert (await orquestrador.handle(aprovado)).outcome == APPLIED
+        assert (await orquestrador.handle(pago)).outcome == APPLIED
+
+        os_ = await _os(db, ordem["id"])
+        assert (os_.status.value, os_.payment_link) == ("PAGA", "https://mp.test/pagar/1")
+        saga = await SqlAlchemySagaRepository(db).get_by_order(ordem["id"])
+        assert saga.current_step.value == "ENFILEIRAR_EXECUCAO"
+
+    async def test_finalizacao_antes_do_reparo_nao_prende_a_os(self, auth_client, db):
+        ordem = await _abrir_os(auth_client)
+        orquestrador, saga_id = await _avancar(db, ordem, CAMINHO)
+        finalizada = _evento("ExecucaoFinalizada", saga_id, ordem["id"])
+
+        assert (await orquestrador.handle(_evento("DiagnosticoIniciado", saga_id, ordem["id"]))).outcome == APPLIED
+        with pytest.raises(OutOfOrderEventError):
+            await orquestrador.handle(finalizada)
+        saga = await SqlAlchemySagaRepository(db).get_by_order(ordem["id"])
+        assert saga.state.value == "EM_ANDAMENTO"
+
+        assert (await orquestrador.handle(_evento("ReparoIniciado", saga_id, ordem["id"]))).outcome == APPLIED
+        assert (await orquestrador.handle(finalizada)).outcome == APPLIED
+
+        assert (await _os(db, ordem["id"])).status.value == "FINALIZADA"
+        assert (await SqlAlchemySagaRepository(db).get_by_order(ordem["id"])).state.value == "CONCLUIDA"
+        assert (await auth_client.post(f"/api/v1/service-orders/{ordem['id']}/deliver")).status_code == 200
+
+    async def test_pagamento_tardio_continua_pedindo_estorno(self, auth_client, db):
+        ordem = await _abrir_os(auth_client)
+        orquestrador, saga_id = await _avancar(db, ordem, CAMINHO[:3])
+        await orquestrador.handle(_evento("PagamentoExpirado", saga_id, ordem["id"], produtor="billing-service"))
+
+        resultado = await orquestrador.handle(
+            _evento("PagamentoConfirmado", saga_id, ordem["id"], CAMINHO[3][1], "billing-service")
+        )
+
+        assert (resultado.outcome, resultado.commands) == (APPLIED, ["CancelarCobranca"])
 
 
 class TestReenvio:
@@ -251,6 +340,37 @@ class TestReenvio:
         assert comandos[0][1]["message_id"] != comandos[1][1]["message_id"]
         saga = (await auth_client.get(f"/api/v1/service-orders/{ordem['id']}/saga")).json()
         assert saga["steps"][0]["attempts"] == 2
+
+    async def test_evento_processado_durante_o_reenvio_nao_e_desfeito(self, auth_client, db, session_factory):
+        ordem = await _abrir_os(auth_client)
+        agora = datetime.now(UTC)
+        # A reserva de peças foi pedida há 10 minutos e ficou sem resposta.
+        sagas = SqlAlchemySagaRepository(db)
+        saga = await sagas.get_by_order(ordem["id"])
+        saga.steps[SagaStep.RESERVAR_PECAS].last_sent_at = agora - timedelta(minutes=10)
+        await sagas.save(saga)
+        await db.commit()
+
+        async with session_factory() as sessao_do_reenvio:
+            reenvio = build_orchestrator(sessao_do_reenvio, notify=False)
+            listar = reenvio._sagas.list_running
+
+            async def listar_e_chegar_o_evento():
+                # Outro pod processa PecasReservadas logo depois da listagem do reenvio.
+                fotos = await listar()
+                await _avancar(db, ordem, CAMINHO[:1])
+                return fotos
+
+            reenvio._sagas.list_running = listar_e_chegar_o_evento
+            assert await reenvio.retry_stalled(agora) == 0
+
+        db.expire_all()
+        saga = await SqlAlchemySagaRepository(db).get_by_order(ordem["id"])
+        assert saga.current_step == SagaStep.GERAR_ORCAMENTO
+        assert saga.steps[SagaStep.RESERVAR_PECAS].status.value == "CONCLUIDA"
+        assert [tipo for tipo, _ in await _comandos(db)] == ["ReservarPecas", "GerarOrcamento"]
+        gerado = _evento("OrcamentoGerado", saga.id, ordem["id"], CAMINHO[1][1], "billing-service")
+        assert (await build_orchestrator(db, notify=False).handle(gerado)).outcome == APPLIED
 
     async def test_sem_etapas_paradas_nao_faz_nada(self, auth_client, db):
         await _abrir_os(auth_client)

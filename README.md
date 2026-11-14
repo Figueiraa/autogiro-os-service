@@ -407,6 +407,28 @@ quality gate do SonarCloud bloqueia o merge.
   com as variáveis `base_url`, `token` e os ids usados nos caminhos.
 - [`docs/postman/autogiro-fluxo-completo.postman_collection.json`](docs/postman/autogiro-fluxo-completo.postman_collection.json): o fluxo inteiro da OS pelos três serviços, da abertura à entrega.
 
+## Limitações conhecidas
+
+Decisões de escopo e casos de borda conhecidos, registrados para não passarem por recursos:
+
+- **Autenticação sem papéis.** O token emitido pela Lambda prova a identidade do cliente (CPF),
+  mas não carrega papel: qualquer token válido acessa todas as rotas protegidas, inclusive as
+  da oficina. O enunciado pede autenticação por CPF; a autorização por papel (cliente,
+  atendente, mecânico) e a restrição do cliente às próprias OS ficaram fora do escopo. Seria
+  uma claim de papel no token e uma checagem por rota.
+- **Acompanhamento público por id sequencial.** `GET /service-orders/{id}/status` não exige
+  token e usa o id da OS, então dá para consultar o status de qualquer OS por tentativa. Só
+  número e status aparecem, sem dados do cliente; em produção seria um código público aleatório.
+- **Broker sem volume persistente.** O RabbitMQ roda no cluster sem disco. Um comando perdido é
+  reenviado pelo orquestrador (etapa parada há mais de 120 s); um evento perdido numa etapa de
+  espera (aprovação, pagamento, andamento da oficina) exigiria intervenção. Em produção, volume
+  persistente ou broker gerenciado.
+- **Sucesso tardio depois da compensação.** Se uma resposta positiva (`PecasReservadas`,
+  `ExecucaoEnfileirada`) chega depois que a Saga já compensou — só acontece com reenvio e mudança
+  de estoque ou de fila entre as duas tentativas —, ela é ignorada e a reserva ou a execução
+  órfã precisa ser desfeita à mão. O pagamento tardio, o caso que envolve dinheiro, é tratado:
+  vira estorno.
+
 ## Repositórios da plataforma
 
 | Repositório | Papel |

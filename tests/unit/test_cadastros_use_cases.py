@@ -1,6 +1,7 @@
 """Casos de uso dos cadastros (clientes, veículos e catálogo de serviços) sobre SQLite."""
 
 import pytest
+from sqlalchemy import text
 
 from app.application.dtos.client_dtos import CreateClientInput, UpdateClientInput
 from app.application.dtos.service_type_dtos import CreateServiceTypeInput, UpdateServiceTypeInput
@@ -27,8 +28,12 @@ from app.application.use_cases.vehicle import (
     ListVehiclesUseCase,
     UpdateVehicleUseCase,
 )
+from app.domain.entities.service_order import ServiceOrder, ServiceOrderItem
 from app.domain.exceptions import ConflictError, NotFoundError
 from app.infrastructure.persistence.repositories.client_repository import SqlAlchemyClientRepository
+from app.infrastructure.persistence.repositories.service_order_repository import (
+    SqlAlchemyServiceOrderRepository,
+)
 from app.infrastructure.persistence.repositories.service_type_repository import (
     SqlAlchemyServiceTypeRepository,
 )
@@ -87,6 +92,28 @@ class TestClientes:
         await DeleteClientUseCase(clientes).execute(maria.id)
         assert await clientes.get_by_id(maria.id) is None
 
+    async def test_cliente_com_veiculo_nao_e_removido(self, clientes, veiculos):
+        maria = await _maria(clientes)
+        await CreateVehicleUseCase(veiculos, clientes).execute(
+            CreateVehicleInput(plate="ABC1D23", brand="Fiat", model="Uno", year=2020, client_id=maria.id)
+        )
+
+        with pytest.raises(ConflictError, match="veículos ou ordens de serviço vinculados"):
+            await DeleteClientUseCase(clientes).execute(maria.id)
+        assert await clientes.get_by_id(maria.id) is not None
+
+    async def test_vinculo_recusado_pelo_banco_vira_conflito(self, clientes, veiculos):
+        # Vínculo criado entre a checagem do caso de uso e a exclusão: o repositório
+        # converte o erro de integridade em conflito, e a sessão continua utilizável.
+        maria = await _maria(clientes)
+        await CreateVehicleUseCase(veiculos, clientes).execute(
+            CreateVehicleInput(plate="ABC1D23", brand="Fiat", model="Uno", year=2020, client_id=maria.id)
+        )
+
+        with pytest.raises(ConflictError):
+            await clientes.delete(maria.id)
+        assert await clientes.get_by_id(maria.id) is not None
+
     @pytest.mark.parametrize(
         "acao",
         [
@@ -140,6 +167,21 @@ class TestVeiculos:
         assert (atualizado.model, atualizado.year) == ("Uno Way", 2021)
         assert await veiculos.get_by_id(uno.id) is None
 
+    async def test_veiculo_com_ordem_de_servico_nao_e_removido(self, clientes, veiculos, servicos, db):
+        maria, uno = await self._uno(clientes, veiculos)
+        oleo = await CreateServiceTypeUseCase(servicos).execute(CreateServiceTypeInput(name="Óleo", price=149.9))
+        item = ServiceOrderItem(service_type_id=oleo.id, name=oleo.name, quantity=1, unit_price=149.9)
+        await SqlAlchemyServiceOrderRepository(db).add(
+            ServiceOrder.open(number="OS1", vehicle_id=uno.id, client_id=maria.id, items=[item], parts=[])
+        )
+
+        with pytest.raises(ConflictError, match="ordens de serviço vinculadas"):
+            await DeleteVehicleUseCase(veiculos).execute(uno.id)
+        # Sem a checagem do caso de uso, o banco recusa e o repositório responde com conflito.
+        with pytest.raises(ConflictError):
+            await veiculos.delete(uno.id)
+        assert await veiculos.get_by_id(uno.id) is not None
+
     @pytest.mark.parametrize(
         "acao",
         [
@@ -192,6 +234,24 @@ class TestCatalogoDeServicos:
             50,
         )
         assert await servicos.get_by_id(oleo.id) is None
+
+    async def test_vinculo_recusado_pelo_banco_vira_conflito(self, clientes, veiculos, servicos, db):
+        oleo = await self._oleo(servicos)
+        maria = await _maria(clientes)
+        uno = await CreateVehicleUseCase(veiculos, clientes).execute(
+            CreateVehicleInput(plate="ABC1D23", brand="Fiat", model="Uno", year=2020, client_id=maria.id)
+        )
+        item = ServiceOrderItem(service_type_id=oleo.id, name=oleo.name, quantity=1, unit_price=149.9)
+        await SqlAlchemyServiceOrderRepository(db).add(
+            ServiceOrder.open(number="OS1", vehicle_id=uno.id, client_id=maria.id, items=[item], parts=[])
+        )
+        # O SQLite só confere chave estrangeira com o PRAGMA ligado (o PostgreSQL sempre confere).
+        await db.execute(text("PRAGMA foreign_keys=ON"))
+
+        with pytest.raises(ConflictError):
+            await servicos.delete(oleo.id)
+        with pytest.raises(ConflictError, match="já foi usado em ordens de serviço"):
+            await DeleteServiceTypeUseCase(servicos).execute(oleo.id)
 
     @pytest.mark.parametrize(
         "acao",

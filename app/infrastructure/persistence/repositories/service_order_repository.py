@@ -1,4 +1,4 @@
-from sqlalchemy import case, func, select
+from sqlalchemy import case, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -68,6 +68,7 @@ class SqlAlchemyServiceOrderRepository(ServiceOrderRepositoryPort):
 
     async def update(self, order: ServiceOrder, commit: bool = True) -> ServiceOrder:
         model = await self._get_model(order.id)
+        model.number = order.number
         model.status = order.status
         model.notes = order.notes
         model.budget_total = order.budget_total
@@ -99,10 +100,6 @@ class SqlAlchemyServiceOrderRepository(ServiceOrderRepositoryPort):
             await self._db.commit()
         else:
             await self._db.flush()
-
-    async def count(self) -> int:
-        result = await self._db.execute(select(func.count(ServiceOrderModel.id)))
-        return result.scalar_one()
 
     async def get_completed_with_times(self) -> list[ServiceOrder]:
         result = await self._db.execute(

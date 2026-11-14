@@ -1,7 +1,15 @@
 import re
 from datetime import datetime
+from typing import Annotated
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
+
+# Tamanhos das colunas de `clients` (migration 001): texto maior vira 422 aqui, em
+# vez de 500 no INSERT/UPDATE.
+Name = Annotated[str, Field(max_length=255)]
+Phone = Annotated[str, Field(max_length=20)]
+Email = Annotated[str, Field(max_length=255)]
+Address = Annotated[str, Field(max_length=500)]
 
 
 def _clean_document(value: str) -> str:
@@ -34,11 +42,11 @@ def _validate_cnpj(digits: str) -> bool:
 
 
 class ClientCreate(BaseModel):
-    name: str
+    name: Name
     cpf_cnpj: str
-    phone: str | None = None
-    email: str | None = None
-    address: str | None = None
+    phone: Phone | None = None
+    email: Email | None = None
+    address: Address | None = None
 
     @field_validator("cpf_cnpj")
     @classmethod
@@ -50,10 +58,10 @@ class ClientCreate(BaseModel):
 
 
 class ClientUpdate(BaseModel):
-    name: str | None = None
-    phone: str | None = None
-    email: str | None = None
-    address: str | None = None
+    name: Name | None = None
+    phone: Phone | None = None
+    email: Email | None = None
+    address: Address | None = None
 
 
 class ClientResponse(BaseModel):

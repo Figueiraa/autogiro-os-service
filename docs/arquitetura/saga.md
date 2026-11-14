@@ -88,7 +88,9 @@ temporárias (rede, 5xx, 429) seguem o caminho normal de nova tentativa e DLQ.
 |---|---|
 | Mesma mensagem entregue duas vezes (o RabbitMQ garante *at-least-once*) | Todo consumidor grava o `message_id` em `processed_messages` na mesma transação do efeito. Se já existe, descarta |
 | Mesmo comando reenviado com outro `message_id` (reenvio de etapa parada) | Idempotência **de negócio** por `order_id`: reserva, orçamento e execução são únicos por OS. Reprocessar não refaz o efeito e grava de novo o mesmo evento de resposta |
-| Evento que não corresponde à etapa atual (atrasado ou repetido) | O orquestrador registra e ignora, **exceto** um `PagamentoConfirmado` com a Saga em `COMPENSANDO` ou `COMPENSADA`: aí envia `CancelarCobranca` de novo, que estorna o pagamento tardio |
+| Evento de etapa já concluída (atrasado ou repetido) | O orquestrador registra e ignora, **exceto** um `PagamentoConfirmado` com a Saga em `COMPENSANDO` ou `COMPENSADA`: aí envia `CancelarCobranca` de novo, que estorna o pagamento tardio |
+| Evento adiantado: de etapa futura com a Saga em andamento (consumo paralelo, `OrcamentoAprovado` antes de `OrcamentoGerado`) | Não é registrado como processado: a exceção leva o evento à fila de retry, e ele volta quando o anterior já foi aplicado |
+| Andamento da execução fora de ordem (`DiagnosticoIniciado`, `ReparoIniciado` e `ExecucaoFinalizada` são da mesma etapa) | Decidido pelo status da OS: evento de status já alcançado é ignorado; evento que pula um status (`ExecucaoFinalizada` com a OS `EM_DIAGNOSTICO`) volta pela fila de retry |
 | Pagamento feito depois do prazo | Ao expirar, o Billing também expira o link no Mercado Pago. Se mesmo assim o cliente pagar, o Billing continua consultando pagamentos expirados ou cancelados por 24 h (`LATE_PAYMENT_WINDOW_HOURS`), publica `PagamentoConfirmado` e cai no caso acima |
 | Evento de uma Saga desconhecida (OS sem Saga ou `saga_id` diferente) | Registrado como processado e ignorado |
 

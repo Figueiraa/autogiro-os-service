@@ -16,8 +16,9 @@ output "database_url" {
   sensitive = true
 }
 
-# A Lambda autogiro-auth usa psycopg. O `search_path=auth` vai na URL: o usuário é
-# criado pela API do Neon e o usuário do serviço não tem permissão para alterá-lo.
+# A Lambda autogiro-auth usa psycopg. O usuário é o `postgresql_role.auth_reader` do
+# main.tf, criado pelo usuário do serviço já com `search_path = auth`; o mesmo valor
+# vai também na URL, como garantia.
 output "auth_database_url" {
   description = "DATABASE_URL da Lambda autogiro-auth (psycopg, usuário somente leitura)."
   value = format(

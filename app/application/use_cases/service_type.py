@@ -69,4 +69,9 @@ class DeleteServiceTypeUseCase:
         service_type = await self._repo.get_by_id(service_type_id)
         if not service_type:
             raise NotFoundError("Serviço", service_type_id)
+        # O banco recusa a exclusão (RESTRICT); checar antes dá uma mensagem clara.
+        if await self._repo.is_referenced(service_type_id):
+            raise ConflictError(
+                f"Serviço {service_type_id} já foi usado em ordens de serviço e não pode ser excluído"
+            )
         await self._repo.delete(service_type_id)

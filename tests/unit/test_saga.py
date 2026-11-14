@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from app.domain.entities.saga import Saga, SagaState, SagaStep, StepStatus
+from app.domain.exceptions import OutOfOrderEventError
 from app.domain.value_objects.service_order_status import ServiceOrderStatus as S
 
 T0 = datetime(2026, 11, 10, 9, 0, tzinfo=UTC)
@@ -114,11 +115,33 @@ class TestIdempotenciaEOrdem:
         saga = _saga_em(SagaStep.GERAR_ORCAMENTO)
         assert saga.apply("PecasReservadas", now=T0).ignored
 
-    def test_evento_fora_da_etapa_e_ignorado(self):
-        saga = _saga_em()
-        decisao = saga.apply("PagamentoConfirmado", now=T0)
+    def test_evento_de_etapa_ja_concluida_e_ignorado(self):
+        saga = _saga_em(SagaStep.AGUARDAR_PAGAMENTO)
+
+        decisao = saga.apply("OrcamentoGerado", now=T0)
+
         assert decisao.ignored
-        assert saga.current_step == SagaStep.RESERVAR_PECAS
+        assert saga.current_step == SagaStep.AGUARDAR_PAGAMENTO
+
+    @pytest.mark.parametrize(
+        ("etapa", "evento"),
+        [
+            (SagaStep.RESERVAR_PECAS, "PagamentoConfirmado"),
+            (SagaStep.GERAR_ORCAMENTO, "OrcamentoAprovado"),
+            (SagaStep.AGUARDAR_APROVACAO, "PagamentoConfirmado"),
+            (SagaStep.AGUARDAR_PAGAMENTO, "ExecucaoEnfileirada"),
+            (SagaStep.ENFILEIRAR_EXECUCAO, "DiagnosticoIniciado"),
+        ],
+    )
+    def test_evento_de_etapa_futura_pede_nova_tentativa_sem_mudar_nada(self, etapa, evento):
+        # Consumo em paralelo: o evento chegou antes do que o precede e precisa voltar depois.
+        saga = _saga_em(etapa)
+        antes = (saga.state, saga.current_step, saga.updated_at, {k: v.status for k, v in saga.steps.items()})
+
+        with pytest.raises(OutOfOrderEventError):
+            saga.apply(evento, now=T0 + timedelta(minutes=1))
+
+        assert (saga.state, saga.current_step, saga.updated_at, {k: v.status for k, v in saga.steps.items()}) == antes
 
     def test_evento_desconhecido_e_ignorado(self):
         assert _saga_em().apply("AlgoQueNaoExiste", now=T0).ignored
@@ -137,6 +160,66 @@ class TestIdempotenciaEOrdem:
 
     def test_confirmacao_sem_compensacao_pendente_e_ignorada(self):
         assert _saga_em(SagaStep.GERAR_ORCAMENTO).apply("CobrancaCancelada", now=T0).ignored
+
+
+class TestAndamentoDaExecucao:
+    """Diagnóstico, reparo e finalização são da mesma etapa: a ordem vem do status da OS."""
+
+    @pytest.mark.parametrize(
+        ("status_da_os", "evento"),
+        [
+            (S.NA_FILA, "ReparoIniciado"),
+            (S.NA_FILA, "ExecucaoFinalizada"),
+            (S.EM_DIAGNOSTICO, "ExecucaoFinalizada"),
+        ],
+    )
+    def test_evento_que_pula_status_pede_nova_tentativa(self, status_da_os, evento):
+        saga = _saga_em(SagaStep.ACOMPANHAR_EXECUCAO)
+
+        with pytest.raises(OutOfOrderEventError):
+            saga.apply(evento, now=T0, order_status=status_da_os)
+
+        # A Saga não termina antes de a OS passar pelo reparo.
+        assert (saga.state, saga.current_step) == (SagaState.EM_ANDAMENTO, SagaStep.ACOMPANHAR_EXECUCAO)
+
+    @pytest.mark.parametrize(
+        ("status_da_os", "evento"),
+        [
+            (S.EM_DIAGNOSTICO, "DiagnosticoIniciado"),
+            (S.EM_EXECUCAO, "DiagnosticoIniciado"),
+            (S.EM_EXECUCAO, "ReparoIniciado"),
+        ],
+    )
+    def test_evento_de_status_ja_alcancado_e_ignorado(self, status_da_os, evento):
+        saga = _saga_em(SagaStep.ACOMPANHAR_EXECUCAO)
+
+        decisao = saga.apply(evento, now=T0, order_status=status_da_os)
+
+        assert decisao.ignored
+        assert decisao.order_transitions == []
+
+    @pytest.mark.parametrize(
+        ("status_da_os", "evento", "transicao"),
+        [
+            (S.NA_FILA, "DiagnosticoIniciado", S.EM_DIAGNOSTICO),
+            (S.EM_DIAGNOSTICO, "ReparoIniciado", S.EM_EXECUCAO),
+            (S.EM_EXECUCAO, "ExecucaoFinalizada", S.FINALIZADA),
+        ],
+    )
+    def test_proximo_status_e_aplicado(self, status_da_os, evento, transicao):
+        saga = _saga_em(SagaStep.ACOMPANHAR_EXECUCAO)
+
+        decisao = saga.apply(evento, now=T0, order_status=status_da_os)
+
+        assert decisao.order_transitions == [(transicao, None)]
+
+    def test_cancelamento_vale_em_qualquer_ponto_da_execucao(self):
+        saga = _saga_em(SagaStep.ACOMPANHAR_EXECUCAO)
+
+        decisao = saga.apply("ExecucaoCancelada", now=T0, order_status=S.EM_DIAGNOSTICO)
+
+        assert decisao.order_transitions == [(S.EM_CANCELAMENTO, "EXECUCAO_CANCELADA")]
+        assert saga.state == SagaState.COMPENSANDO
 
 
 class TestPagamentoTardio:

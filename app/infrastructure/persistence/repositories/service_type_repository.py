@@ -1,9 +1,12 @@
-from sqlalchemy import select
+from sqlalchemy import exists, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.ports.service_type_repository import ServiceTypeRepositoryPort
 from app.domain.entities.service_type import ServiceType
+from app.domain.exceptions import ConflictError
 from app.infrastructure.persistence.mappers.service_type_mapper import to_domain
+from app.infrastructure.persistence.models.service_order_model import ServiceOrderItem
 from app.infrastructure.persistence.models.service_type_model import ServiceType as ServiceTypeModel
 
 
@@ -52,8 +55,19 @@ class SqlAlchemyServiceTypeRepository(ServiceTypeRepositoryPort):
         await self._db.refresh(model)
         return to_domain(model)
 
+    async def is_referenced(self, service_type_id: int) -> bool:
+        query = select(exists().where(ServiceOrderItem.service_type_id == service_type_id))
+        return bool((await self._db.execute(query)).scalar())
+
     async def delete(self, service_type_id: int) -> None:
         model = await self._get_model(service_type_id)
         if model is not None:
             await self._db.delete(model)
-            await self._db.commit()
+            try:
+                await self._db.commit()
+            except IntegrityError as exc:
+                # Vínculo criado entre a verificação do caso de uso e a exclusão.
+                await self._db.rollback()
+                raise ConflictError(
+                    f"Serviço {service_type_id} tem registros vinculados e não pode ser excluído"
+                ) from exc
