@@ -1,17 +1,23 @@
 import re
 from datetime import datetime
+from typing import Annotated
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 # Accepts old format (ABC-1234) and Mercosul (ABC1D23)
 _PLATE_RE = re.compile(r"^[A-Z]{3}[0-9][A-Z0-9][0-9]{2}$")
 
+# Mesmos limites dos CHECKs e das colunas da migration 001: o que o banco recusaria
+# vira 422 aqui, em vez de 500 no INSERT/UPDATE.
+Year = Annotated[int, Field(ge=1900, le=2100, description="Ano do veículo (1900 a 2100)")]
+BrandOrModel = Annotated[str, Field(max_length=100)]
+
 
 class VehicleCreate(BaseModel):
     plate: str
-    brand: str
-    model: str
-    year: int
+    brand: BrandOrModel
+    model: BrandOrModel
+    year: Year
     client_id: int
 
     @field_validator("plate")
@@ -24,18 +30,11 @@ class VehicleCreate(BaseModel):
             raise ValueError("Placa inválida. Use o formato ABC1234 ou ABC1D23")
         return normalized
 
-    @field_validator("year")
-    @classmethod
-    def validate_year(cls, v: int) -> int:
-        if v < 1886 or v > 2100:
-            raise ValueError("Ano do veículo inválido")
-        return v
-
 
 class VehicleUpdate(BaseModel):
-    brand: str | None = None
-    model: str | None = None
-    year: int | None = None
+    brand: BrandOrModel | None = None
+    model: BrandOrModel | None = None
+    year: Year | None = None
 
 
 class VehicleResponse(BaseModel):

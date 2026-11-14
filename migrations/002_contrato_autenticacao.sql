@@ -6,9 +6,10 @@
 -- endereço. O OS Service pode mudar `clients` à vontade, desde que mantenha a view.
 --
 -- O `search_path` do usuário aponta para o schema `auth`, então a consulta atual da
--- Lambda (`FROM clients`) lê a view sem mudar o código dela. No Neon ele vai na
--- própria URL de conexão (saída `auth_database_url` do terraform/), porque o usuário
--- é criado pela API do Neon e o usuário do serviço não pode alterá-lo.
+-- Lambda (`FROM clients`) lê a view sem mudar o código dela. No Neon o usuário é
+-- criado pelo terraform/ (`postgresql_role`, com o usuário do serviço) já com esse
+-- `search_path`, que também vai na URL de conexão (saída `auth_database_url`) como
+-- garantia. A migration 006 reaplica as permissões a esse papel.
 
 CREATE SCHEMA IF NOT EXISTS auth;
 
@@ -29,7 +30,8 @@ $$;
 GRANT USAGE ON SCHEMA auth TO auth_reader;
 GRANT SELECT ON auth.clients TO auth_reader;
 -- Só quem tem ADMIN sobre o papel pode alterá-lo (PostgreSQL 16+). Localmente e no
--- CI o papel acabou de ser criado aqui; no Neon, não, e o search_path vem da URL.
+-- CI o papel acabou de ser criado aqui; no Neon, quem o cria é o terraform/, e o
+-- search_path também vem da URL.
 DO $$
 BEGIN
     ALTER ROLE auth_reader SET search_path = auth;

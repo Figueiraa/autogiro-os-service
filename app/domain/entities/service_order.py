@@ -113,6 +113,15 @@ class ServiceOrder:
         )
         return order
 
+    @staticmethod
+    def number_for(order_id: int, opened_at: datetime) -> str:
+        """Número exibido da OS: `OS` + data de abertura (AAAAMMDD) + id com 4 dígitos ou mais.
+
+        O id é único por construção; contar as OS existentes daria o mesmo número a
+        duas aberturas simultâneas.
+        """
+        return f"OS{opened_at.strftime('%Y%m%d')}{order_id:04d}"
+
     @property
     def services_total(self) -> float:
         return round(sum(item.subtotal for item in self.items), 2)

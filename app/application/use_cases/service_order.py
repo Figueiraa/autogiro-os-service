@@ -5,6 +5,7 @@ que reserva as peças no Execution Service e gera o orçamento no Billing Servic
 """
 
 import logging
+import uuid
 from datetime import UTC, datetime
 from typing import Protocol
 
@@ -69,9 +70,9 @@ class OpenServiceOrderUseCase:
         parts = [ServiceOrderPart(part_id=part.part_id, quantity=part.quantity) for part in data.parts]
 
         now = datetime.now(UTC)
-        number = f"OS{now.strftime('%Y%m%d')}{await self._repo.count() + 1:04d}"
         order = ServiceOrder.open(
-            number=number,
+            # Provisório e único até o flush, quando o id que dá o número definitivo existe.
+            number=f"PEND{uuid.uuid4().hex[:16]}",
             vehicle_id=vehicle.id,
             client_id=vehicle.client_id,
             items=items,
@@ -82,6 +83,8 @@ class OpenServiceOrderUseCase:
         # A OS e o início da Saga (com o comando de reserva no outbox) são gravados
         # na mesma transação: não existe OS aberta sem Saga, nem Saga sem OS.
         order = await self._repo.add(order, commit=False)
+        order.number = ServiceOrder.number_for(order.id, now)
+        order = await self._repo.update(order, commit=False)
         await self._saga.start(order)
         await self._uow.commit()
         return order

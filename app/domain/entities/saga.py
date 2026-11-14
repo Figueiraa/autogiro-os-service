@@ -11,6 +11,11 @@ Etapas, na ordem:
 Compensações, enviadas em paralelo quando qualquer etapa falha:
     LIBERAR_PECAS     — se as peças chegaram a ser reservadas
     CANCELAR_COBRANCA — se o orçamento chegou a ser gerado (estorna se já foi pago)
+
+Os eventos são consumidos em paralelo (réplicas, prefetch, fila de retry), então
+um evento pode chegar antes do que o precede. Evento de etapa já passada é
+repetição e é ignorado; evento de etapa futura levanta `OutOfOrderEventError` e
+volta mais tarde pela fila de retry.
 """
 
 import enum
@@ -18,6 +23,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
+from app.domain.exceptions import OutOfOrderEventError
 from app.domain.value_objects.service_order_status import CancelReason, ServiceOrderStatus
 
 
@@ -44,6 +50,16 @@ class StepStatus(str, enum.Enum):
     CONCLUIDA = "CONCLUIDA"
     FALHOU = "FALHOU"
 
+
+# Ordem das etapas do caminho principal (as compensações ficam fora).
+_STEP_ORDER: list[SagaStep] = [
+    SagaStep.RESERVAR_PECAS,
+    SagaStep.GERAR_ORCAMENTO,
+    SagaStep.AGUARDAR_APROVACAO,
+    SagaStep.AGUARDAR_PAGAMENTO,
+    SagaStep.ENFILEIRAR_EXECUCAO,
+    SagaStep.ACOMPANHAR_EXECUCAO,
+]
 
 # Comando enviado ao iniciar cada etapa (etapas de espera não têm comando).
 STEP_COMMAND: dict[SagaStep, str] = {
@@ -88,6 +104,20 @@ _ADVANCE: dict[str, tuple[SagaStep | None, ServiceOrderStatus | None]] = {
 _PROGRESS: dict[str, ServiceOrderStatus] = {
     "DiagnosticoIniciado": ServiceOrderStatus.EM_DIAGNOSTICO,
     "ReparoIniciado": ServiceOrderStatus.EM_EXECUCAO,
+}
+
+# Status da OS durante a execução, na ordem em que acontecem. Os três eventos de
+# andamento são da mesma etapa: a ordem entre eles vem do status da OS.
+_EXECUTION_ORDER: list[ServiceOrderStatus] = [
+    ServiceOrderStatus.NA_FILA,
+    ServiceOrderStatus.EM_DIAGNOSTICO,
+    ServiceOrderStatus.EM_EXECUCAO,
+    ServiceOrderStatus.FINALIZADA,
+]
+_EXECUTION_TARGET: dict[str, ServiceOrderStatus] = {
+    "DiagnosticoIniciado": ServiceOrderStatus.EM_DIAGNOSTICO,
+    "ReparoIniciado": ServiceOrderStatus.EM_EXECUCAO,
+    "ExecucaoFinalizada": ServiceOrderStatus.FINALIZADA,
 }
 
 # Evento de falha → motivo do cancelamento.
@@ -156,7 +186,19 @@ class Saga:
         return saga, Decision(commands=[command])
 
     # ─── Eventos ────────────────────────────────────────────────────────────
-    def apply(self, event_type: str, now: datetime | None = None) -> Decision:
+    def apply(
+        self,
+        event_type: str,
+        now: datetime | None = None,
+        *,
+        order_status: ServiceOrderStatus | None = None,
+    ) -> Decision:
+        """Decide o que fazer com o evento.
+
+        `order_status` é o status atual da OS: ordena os eventos de andamento da
+        execução, que pertencem à mesma etapa. Levanta `OutOfOrderEventError`, sem
+        mudar nada, quando o evento chega antes do que o precede.
+        """
         moment = now or datetime.now(UTC)
 
         if event_type == "PagamentoConfirmado" and self.state in (
@@ -170,8 +212,9 @@ class Saga:
             return Decision(ignored=True, note=f"evento desconhecido: {event_type}")
         if self.state != SagaState.EM_ANDAMENTO:
             return Decision(ignored=True, note=f"Saga {self.state.value}: {event_type} ignorado")
-        if EVENT_STEP[event_type] != self.current_step:
-            return Decision(ignored=True, note=f"{event_type} fora da etapa atual ({self.current_step})")
+        repeated = self._check_order(event_type, order_status)
+        if repeated:
+            return Decision(ignored=True, note=repeated)
 
         self.updated_at = moment
         if event_type in _FAILURE:
@@ -179,6 +222,24 @@ class Saga:
         if event_type in _PROGRESS:
             return Decision(order_transitions=[(_PROGRESS[event_type], None)])
         return self._advance(event_type, moment)
+
+    def _check_order(self, event_type: str, order_status: ServiceOrderStatus | None) -> str | None:
+        """Devolve o motivo para ignorar um evento repetido; levanta se ele chegou cedo demais."""
+        step = EVENT_STEP[event_type]
+        if step != self.current_step:
+            if _STEP_ORDER.index(step) > _STEP_ORDER.index(self.current_step):
+                raise OutOfOrderEventError(event_type, f"a Saga ainda está em {self.current_step.value}")
+            return f"{event_type} de etapa já concluída (atual: {self.current_step.value})"
+
+        target = _EXECUTION_TARGET.get(event_type)
+        if target is None or order_status not in _EXECUTION_ORDER:
+            return None
+        gap = _EXECUTION_ORDER.index(target) - _EXECUTION_ORDER.index(order_status)
+        if gap <= 0:
+            return f"{event_type} repetido: a OS já está em {order_status.value}"
+        if gap > 1:
+            raise OutOfOrderEventError(event_type, f"a OS ainda está em {order_status.value}")
+        return None
 
     def _advance(self, event_type: str, moment: datetime) -> Decision:
         self._finish(self.current_step, StepStatus.CONCLUIDA, moment)

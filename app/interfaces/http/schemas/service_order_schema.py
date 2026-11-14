@@ -5,15 +5,18 @@ from pydantic import BaseModel, Field
 from app.domain.entities.saga import Saga, SagaState, SagaStep, StepStatus
 from app.domain.value_objects.service_order_status import ServiceOrderStatus
 
+# Teto de bom senso: evita estourar o INTEGER e o NUMERIC(10, 2) do orçamento.
+MAX_QUANTITY = 1000
+
 
 class ServiceOrderItemInput(BaseModel):
     service_type_id: int
-    quantity: int = Field(1, ge=1)
+    quantity: int = Field(1, ge=1, le=MAX_QUANTITY)
 
 
 class ServiceOrderPartInput(BaseModel):
     part_id: int = Field(description="Id da peça no Execution Service")
-    quantity: int = Field(1, ge=1)
+    quantity: int = Field(1, ge=1, le=MAX_QUANTITY)
 
 
 class ServiceOrderCreate(BaseModel):

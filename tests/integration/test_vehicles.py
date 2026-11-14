@@ -111,3 +111,13 @@ async def test_delete_vehicle(auth_client: AsyncClient):
 async def test_delete_vehicle_not_found_returns_404(auth_client: AsyncClient):
     r = await auth_client.delete("/api/v1/vehicles/9999")
     assert r.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_atualizar_ano_abaixo_do_check_responde_422(auth_client: AsyncClient):
+    # O CHECK da migration 001 aceita 1900 a 2100: sem a validação, o PostgreSQL recusaria com 500.
+    r = await auth_client.post("/api/v1/clients", json={"name": "João", "cpf_cnpj": "529.982.247-25"})
+    cid = r.json()["id"]
+    r = await auth_client.post("/api/v1/vehicles", json={"plate": "ABC1234", "brand": "VW", "model": "Gol", "year": 2020, "client_id": cid})
+    r = await auth_client.patch(f"/api/v1/vehicles/{r.json()['id']}", json={"year": 1899})
+    assert r.status_code == 422

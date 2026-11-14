@@ -33,13 +33,20 @@ async def publish_pending(
 ) -> int:
     """Publica as mensagens pendentes do outbox, na ordem em que foram gravadas.
 
-    Cada mensagem é marcada como publicada logo depois do publish confirmado. Se o
-    processo cair entre os dois, ela é publicada de novo — os consumidores
-    descartam a repetição pelo `message_id`.
+    Uma mensagem por transação: trava a linha, publica, marca e faz commit. Travar
+    um lote e fazer commit a cada linha soltaria a trava das demais, e outra réplica
+    as publicaria em paralelo. Se o processo cair entre o publish e o commit, a
+    mensagem é publicada de novo — os consumidores descartam a repetição pelo
+    `message_id`.
     """
     published = 0
     async with session_factory() as db:
-        for row in await SqlAlchemyOutbox(db).pending(limit):
+        outbox = SqlAlchemyOutbox(db)
+        while published < limit:
+            rows = await outbox.pending(1)
+            if not rows:
+                break
+            row = rows[0]
             with publish_span(
                 exchange=row.exchange,
                 routing_key=row.routing_key,

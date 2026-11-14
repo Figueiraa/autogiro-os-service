@@ -3,6 +3,9 @@
 Executa as decisões do domínio (`Saga`): muda o status da OS, copia os dados que
 os participantes devolvem, grava os próximos comandos no outbox e marca o evento
 como processado — tudo numa transação. A notificação ao cliente sai depois do commit.
+
+Evento que chega antes do que o precede não é marcado como processado: a exceção
+volta ao consumidor, que o manda para a fila de retry.
 """
 
 import logging
@@ -17,7 +20,7 @@ from app.application.ports.service_order_repository import ServiceOrderRepositor
 from app.application.ports.vehicle_repository import VehicleRepositoryPort
 from app.domain.entities.saga import Saga
 from app.domain.entities.service_order import ServiceOrder
-from app.domain.exceptions import InvalidStatusTransitionError
+from app.domain.exceptions import InvalidStatusTransitionError, OutOfOrderEventError
 from app.domain.value_objects.service_order_status import ServiceOrderStatus
 
 logger = logging.getLogger("autogiro.saga")
@@ -84,7 +87,13 @@ class SagaOrchestrator:
             return HandleResult(IGNORED, note="mensagem fora de uma Saga conhecida")
 
         order = await self._orders.get_by_id(envelope.order_id)
-        decision = saga.apply(envelope.type)
+        try:
+            decision = saga.apply(envelope.type, order_status=order.status)
+        except OutOfOrderEventError as exc:
+            # Solta a trava da Saga sem registrar o evento: ele volta pela fila de retry.
+            await self._uow.rollback()
+            logger.info("Saga %s: %s; nova tentativa mais tarde", saga.id, exc)
+            raise
         result = HandleResult(IGNORED if decision.ignored else APPLIED, note=decision.note)
 
         if not decision.ignored:
@@ -93,8 +102,14 @@ class SagaOrchestrator:
                 try:
                     _, seconds = order.transition_to(status, source=envelope.type, reason=reason)
                 except InvalidStatusTransitionError:
-                    logger.warning("OS %s: transição para %s ignorada (repetida)", order.number, status.value)
-                    continue
+                    # Repetições e eventos adiantados já foram filtrados pela Saga: aqui a
+                    # OS e a Saga discordam. Nada é gravado e o evento segue para retry/DLQ.
+                    await self._uow.rollback()
+                    logger.error(
+                        "OS %s: transição %s → %s inválida em %s",
+                        order.number, order.status.value, status.value, envelope.type,
+                    )
+                    raise
                 result.transitions.append((status, seconds))
             await self._orders.update(order, commit=False)
             await self._sagas.save(saga)
@@ -118,19 +133,34 @@ class SagaOrchestrator:
         """
         moment = now or datetime.now(UTC)
         resent = 0
-        for saga in await self._sagas.list_running():
-            stalled = saga.stalled_steps(moment, self._retry_after)
-            if not stalled:
-                continue
-            order = await self._orders.get_by_id(saga.order_id)
-            commands = [saga.mark_resent(record, moment) for record in stalled]
-            await self._sagas.save(saga)
-            await self._send(commands, saga, order, causation_id=None)
-            logger.warning("Saga %s: reenviando %s", saga.id, ", ".join(commands))
-            resent += len(commands)
-        if resent:
-            await self._uow.commit()
+        candidates = [
+            snapshot.order_id
+            for snapshot in await self._sagas.list_running()
+            if snapshot.stalled_steps(moment, self._retry_after)
+        ]
+        await self._uow.commit()
+        for order_id in candidates:
+            resent += await self._retry_one(order_id, moment)
         return resent
+
+    async def _retry_one(self, order_id: int, moment: datetime) -> int:
+        """Reenvia as etapas paradas de uma Saga, relida com trava e numa transação própria.
+
+        A listagem é só uma foto: entre ela e o reenvio, um evento pode ter avançado a
+        Saga. Sem reler com trava, a foto velha seria gravada por cima do avanço.
+        """
+        saga = await self._sagas.get_by_order(order_id, lock=True)
+        stalled = saga.stalled_steps(moment, self._retry_after) if saga else []
+        if not stalled:
+            await self._uow.commit()
+            return 0
+        order = await self._orders.get_by_id(saga.order_id)
+        commands = [saga.mark_resent(record, moment) for record in stalled]
+        await self._sagas.save(saga)
+        await self._send(commands, saga, order, causation_id=None)
+        await self._uow.commit()
+        logger.warning("Saga %s: reenviando %s", saga.id, ", ".join(commands))
+        return len(commands)
 
     # ─── Auxiliares ─────────────────────────────────────────────────────────
     async def _send(

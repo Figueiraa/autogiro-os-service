@@ -82,7 +82,9 @@ cada `OUTBOX_POLL_SECONDS` (1 s), até 100 por ciclo, na ordem em que foram grav
 cada uma como publicada depois do *publisher confirm*.
 
 - No OS e no Billing (PostgreSQL), o publicador lê as pendentes com
-  `SELECT … FOR UPDATE SKIP LOCKED`: cada réplica publica só o que nenhuma outra pegou.
+  `SELECT … FOR UPDATE SKIP LOCKED`: cada réplica publica só o que nenhuma outra pegou. No
+  OS, cada mensagem tem a própria transação (trava, publica, marca, commit), para o commit de
+  uma não soltar a trava das seguintes.
 - No Execution (MongoDB), o publicador não reserva as mensagens: com duas réplicas, um evento
   pode ser publicado duas vezes. O consumidor descarta a repetição pelo `message_id`.
 - Se o processo cair entre o publish e a marcação, a mensagem sai de novo, com o mesmo

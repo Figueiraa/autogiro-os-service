@@ -67,4 +67,9 @@ class DeleteClientUseCase:
         client = await self._repo.get_by_id(client_id)
         if not client:
             raise NotFoundError("Cliente", client_id)
+        # O banco recusa a exclusão (RESTRICT); checar antes dá uma mensagem clara.
+        if await self._repo.is_referenced(client_id):
+            raise ConflictError(
+                f"Cliente {client_id} tem veículos ou ordens de serviço vinculados e não pode ser excluído"
+            )
         await self._repo.delete(client_id)
